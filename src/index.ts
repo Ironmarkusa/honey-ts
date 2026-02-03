@@ -53,6 +53,7 @@ export {
   injectWhere,
   overrideSelects,
   getTableAliases,
+  getSelectAliases,
 } from "./helpers.js";
 
 export type { AliasScope } from "./helpers.js";

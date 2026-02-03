@@ -4,7 +4,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { overrideSelects, injectWhere } from "./index.js";
+import { overrideSelects, injectWhere, getSelectAliases, fromSql } from "./index.js";
 import type { SqlClause } from "./types.js";
 
 describe("overrideSelects", () => {
@@ -290,5 +290,98 @@ describe("injectWhere", () => {
     // Should appear twice (once in main, once in subquery)
     const matches = whereStr.match(/tenant_id/g);
     assert.strictEqual(matches?.length, 2);
+  });
+});
+
+describe("getSelectAliases", () => {
+  it("maps bare columns to themselves", () => {
+    const clause = fromSql("SELECT id, name FROM users");
+    const tree = getSelectAliases(clause);
+
+    assert.strictEqual(tree.aliases.get("id"), "id");
+    assert.strictEqual(tree.aliases.get("name"), "name");
+  });
+
+  it("maps qualified columns to column name", () => {
+    const clause = fromSql("SELECT u.id, u.name FROM users u");
+    const tree = getSelectAliases(clause);
+
+    assert.strictEqual(tree.aliases.get("u.id"), "id");
+    assert.strictEqual(tree.aliases.get("u.name"), "name");
+  });
+
+  it("maps aliased columns to alias", () => {
+    const clause = fromSql("SELECT id AS user_id, name AS full_name FROM users");
+    const tree = getSelectAliases(clause);
+
+    assert.strictEqual(tree.aliases.get("id"), "user_id");
+    assert.strictEqual(tree.aliases.get("name"), "full_name");
+  });
+
+  it("maps qualified aliased columns", () => {
+    const clause = fromSql("SELECT u.id AS user_id FROM users u");
+    const tree = getSelectAliases(clause);
+
+    assert.strictEqual(tree.aliases.get("u.id"), "user_id");
+  });
+
+  it("maps aggregate functions", () => {
+    const clause = fromSql("SELECT COUNT(*) AS total FROM users");
+    const tree = getSelectAliases(clause);
+
+    assert.strictEqual(tree.aliases.get("COUNT(*)"), "total");
+  });
+
+  it("handles subqueries in SELECT", () => {
+    const clause = fromSql(
+      "SELECT id, (SELECT COUNT(*) FROM orders WHERE user_id = u.id) AS order_count FROM users u"
+    );
+    const tree = getSelectAliases(clause);
+
+    assert.strictEqual(tree.aliases.get("id"), "id");
+    assert.strictEqual(tree.aliases.get("(subquery)"), "order_count");
+    assert.strictEqual(tree.children.length, 1);
+    assert.strictEqual(tree.children[0]!.location, "select");
+  });
+
+  it("handles CTEs", () => {
+    const clause = fromSql(
+      "WITH active AS (SELECT id, email FROM users WHERE active = true) SELECT * FROM active"
+    );
+    const tree = getSelectAliases(clause);
+
+    assert.strictEqual(tree.children.length, 1);
+    assert.strictEqual(tree.children[0]!.location, "with:active");
+    assert.strictEqual(tree.children[0]!.aliases.get("id"), "id");
+    assert.strictEqual(tree.children[0]!.aliases.get("email"), "email");
+  });
+
+  it("handles UNION branches (from clause)", () => {
+    // fromSql returns raw for UNION, so test with clause directly
+    const clause: SqlClause = {
+      union: [
+        { select: [["id", "user_id"]], from: "users" },
+        { select: [["id", "user_id"]], from: "admins" },
+      ],
+    };
+    const tree = getSelectAliases(clause);
+
+    assert.strictEqual(tree.children.length, 2);
+    assert.strictEqual(tree.children[0]!.aliases.get("id"), "user_id");
+    assert.strictEqual(tree.children[1]!.aliases.get("id"), "user_id");
+  });
+
+  it("ignores star selects", () => {
+    const clause = fromSql("SELECT * FROM users");
+    const tree = getSelectAliases(clause);
+
+    assert.strictEqual(tree.aliases.size, 0);
+  });
+
+  it("ignores qualified star selects", () => {
+    const clause = fromSql("SELECT u.* FROM users u");
+    const tree = getSelectAliases(clause);
+
+    assert.strictEqual(tree.aliases.size, 0);
   });
 });

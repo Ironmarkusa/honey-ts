@@ -88,6 +88,175 @@ export function getTableAliases(clause: SqlClause, location = "root"): AliasScop
 }
 
 /**
+ * Get select column aliases from a query as a tree of scopes.
+ *
+ * Returns column expression → output alias mapping for each SELECT.
+ *
+ * @example
+ * ```ts
+ * const tree = getSelectAliases(clause);
+ * // SELECT u.id AS user_id, name FROM users u
+ * tree.aliases  // Map { "u.id" => "user_id", "name" => "name" }
+ * ```
+ */
+export function getSelectAliases(clause: SqlClause, location = "root"): AliasScope {
+  const scope: AliasScope = {
+    aliases: extractSelectAliasMap(clause),
+    location,
+    children: [],
+  };
+
+  // WITH / WITH RECURSIVE - each CTE is a scope
+  for (const key of ["with", "with-recursive"] as const) {
+    const ctes = clause[key] as [string, SqlClause][] | undefined;
+    if (ctes) {
+      for (const [name, cte] of ctes) {
+        scope.children.push(getSelectAliases(cte, `${key}:${name}`));
+      }
+    }
+  }
+
+  // UNION / INTERSECT / EXCEPT - each branch is a scope
+  for (const key of ["union", "union-all", "intersect", "except", "except-all"] as const) {
+    const branches = clause[key] as SqlClause[] | undefined;
+    if (branches) {
+      branches.forEach((branch, i) => {
+        scope.children.push(getSelectAliases(branch, `${key}[${i}]`));
+      });
+    }
+  }
+
+  // FROM - may contain subqueries
+  if (clause.from) {
+    collectSelectAliasScopes(clause.from as SqlExpr, "from", scope.children);
+  }
+
+  // WHERE - may contain subqueries
+  if (clause.where) {
+    collectSelectAliasScopes(clause.where as SqlExpr, "where", scope.children);
+  }
+
+  // SELECT - may contain scalar subqueries
+  if (clause.select) {
+    collectSelectAliasScopes(clause.select as SqlExpr, "select", scope.children);
+  }
+
+  return scope;
+}
+
+/**
+ * Extract column → alias mapping from SELECT clause.
+ */
+function extractSelectAliasMap(clause: SqlClause): Map<string, string> {
+  const columnToAlias = new Map<string, string>();
+
+  // Handle all select variants
+  for (const key of ["select", "select-distinct"] as const) {
+    const selectValue = clause[key];
+    if (!selectValue) continue;
+
+    const items = Array.isArray(selectValue) ? selectValue : [selectValue];
+    for (const item of items) {
+      extractColumnAlias(item as SqlExpr, columnToAlias);
+    }
+  }
+
+  // select-distinct-on: [onExprs, ...selectExprs]
+  if (clause["select-distinct-on"]) {
+    const arr = clause["select-distinct-on"] as SqlExpr[];
+    for (let i = 1; i < arr.length; i++) {
+      extractColumnAlias(arr[i] as SqlExpr, columnToAlias);
+    }
+  }
+
+  return columnToAlias;
+}
+
+/**
+ * Extract column expression → alias from a single select item.
+ */
+function extractColumnAlias(item: SqlExpr, columnToAlias: Map<string, string>): void {
+  // Skip * and qualified *
+  if (item === "*") return;
+  if (typeof item === "string" && item.endsWith(".*")) return;
+
+  // Bare column: "id" or "u.id"
+  if (typeof item === "string") {
+    // For qualified names like "u.id", the output alias is just the column part
+    const outputAlias = item.includes(".") ? item.split(".").pop()! : item;
+    columnToAlias.set(item, outputAlias);
+    return;
+  }
+
+  // [expr, alias] form
+  if (Array.isArray(item) && item.length === 2) {
+    const [expr, alias] = item;
+    if (typeof alias === "string" && !alias.startsWith("%")) {
+      // Format expression as string key
+      const exprKey = exprToString(expr as SqlExpr);
+      columnToAlias.set(exprKey, alias);
+      return;
+    }
+  }
+
+  // Expression without alias - try to derive a key
+  if (Array.isArray(item)) {
+    const exprKey = exprToString(item);
+    columnToAlias.set(exprKey, exprKey);
+  }
+}
+
+/**
+ * Convert expression to a string key for the alias map.
+ */
+function exprToString(expr: SqlExpr): string {
+  if (typeof expr === "string") return expr;
+  if (typeof expr === "number") return String(expr);
+  if (expr === null) return "NULL";
+  if (typeof expr === "boolean") return String(expr).toUpperCase();
+  if (Array.isArray(expr)) {
+    // Function call like ["%count", "*"]
+    if (typeof expr[0] === "string" && expr[0].startsWith("%")) {
+      const fn = expr[0].slice(1).toUpperCase();
+      const args = expr.slice(1).map(e => exprToString(e as SqlExpr)).join(", ");
+      return `${fn}(${args})`;
+    }
+    // Just join for other arrays
+    return expr.map(e => exprToString(e as SqlExpr)).join(".");
+  }
+  if (typeof expr === "object" && expr !== null) {
+    if ("$" in expr) return String((expr as { $: unknown }).$);
+    if ("__raw" in expr) return String((expr as { __raw: unknown }).__raw);
+    // Subquery or clause object
+    if (isClauseMap(expr)) return "(subquery)";
+  }
+  return String(expr);
+}
+
+/**
+ * Recursively find subqueries and collect their select alias scopes.
+ */
+function collectSelectAliasScopes(
+  expr: SqlExpr,
+  basePath: string,
+  children: AliasScope[],
+  index = { n: 0 }
+): void {
+  if (isClauseMap(expr)) {
+    const location = index.n === 0 ? basePath : `${basePath}[${index.n}]`;
+    index.n++;
+    children.push(getSelectAliases(expr, location));
+    return;
+  }
+
+  if (Array.isArray(expr)) {
+    for (const item of expr) {
+      collectSelectAliasScopes(item as SqlExpr, basePath, children, index);
+    }
+  }
+}
+
+/**
  * Recursively find subqueries in an expression and add their scopes.
  */
 function collectSubqueryScopes(
