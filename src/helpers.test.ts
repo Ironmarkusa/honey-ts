@@ -302,12 +302,13 @@ describe("getSelectAliases", () => {
     assert.strictEqual(tree.aliases.get("name"), "name");
   });
 
-  it("maps qualified columns to column name", () => {
+  it("maps qualified columns to column name, resolving table alias", () => {
     const clause = fromSql("SELECT u.id, u.name FROM users u");
     const tree = getSelectAliases(clause);
 
-    assert.strictEqual(tree.aliases.get("u.id"), "id");
-    assert.strictEqual(tree.aliases.get("u.name"), "name");
+    // u.id → users.id, alias is "id"
+    assert.strictEqual(tree.aliases.get("users.id"), "id");
+    assert.strictEqual(tree.aliases.get("users.name"), "name");
   });
 
   it("maps aliased columns to alias", () => {
@@ -318,11 +319,12 @@ describe("getSelectAliases", () => {
     assert.strictEqual(tree.aliases.get("name"), "full_name");
   });
 
-  it("maps qualified aliased columns", () => {
+  it("maps qualified aliased columns, resolving table alias", () => {
     const clause = fromSql("SELECT u.id AS user_id FROM users u");
     const tree = getSelectAliases(clause);
 
-    assert.strictEqual(tree.aliases.get("u.id"), "user_id");
+    // u.id → users.id
+    assert.strictEqual(tree.aliases.get("users.id"), "user_id");
   });
 
   it("maps aggregate functions", () => {

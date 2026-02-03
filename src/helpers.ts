@@ -146,9 +146,11 @@ export function getSelectAliases(clause: SqlClause, location = "root"): AliasSco
 
 /**
  * Extract column → alias mapping from SELECT clause.
+ * Resolves table aliases to actual table names.
  */
 function extractSelectAliasMap(clause: SqlClause): Map<string, string> {
   const columnToAlias = new Map<string, string>();
+  const tableAliasMap = extractTableAliases(clause); // alias → table name
 
   // Handle all select variants
   for (const key of ["select", "select-distinct"] as const) {
@@ -157,7 +159,7 @@ function extractSelectAliasMap(clause: SqlClause): Map<string, string> {
 
     const items = Array.isArray(selectValue) ? selectValue : [selectValue];
     for (const item of items) {
-      extractColumnAlias(item as SqlExpr, columnToAlias);
+      extractColumnAlias(item as SqlExpr, columnToAlias, tableAliasMap);
     }
   }
 
@@ -165,7 +167,7 @@ function extractSelectAliasMap(clause: SqlClause): Map<string, string> {
   if (clause["select-distinct-on"]) {
     const arr = clause["select-distinct-on"] as SqlExpr[];
     for (let i = 1; i < arr.length; i++) {
-      extractColumnAlias(arr[i] as SqlExpr, columnToAlias);
+      extractColumnAlias(arr[i] as SqlExpr, columnToAlias, tableAliasMap);
     }
   }
 
@@ -174,17 +176,23 @@ function extractSelectAliasMap(clause: SqlClause): Map<string, string> {
 
 /**
  * Extract column expression → alias from a single select item.
+ * Resolves table aliases to actual table names.
  */
-function extractColumnAlias(item: SqlExpr, columnToAlias: Map<string, string>): void {
+function extractColumnAlias(
+  item: SqlExpr,
+  columnToAlias: Map<string, string>,
+  tableAliasMap: Map<string, string>
+): void {
   // Skip * and qualified *
   if (item === "*") return;
   if (typeof item === "string" && item.endsWith(".*")) return;
 
   // Bare column: "id" or "u.id"
   if (typeof item === "string") {
+    const resolved = resolveColumnName(item, tableAliasMap);
     // For qualified names like "u.id", the output alias is just the column part
     const outputAlias = item.includes(".") ? item.split(".").pop()! : item;
-    columnToAlias.set(item, outputAlias);
+    columnToAlias.set(resolved, outputAlias);
     return;
   }
 
@@ -192,8 +200,8 @@ function extractColumnAlias(item: SqlExpr, columnToAlias: Map<string, string>): 
   if (Array.isArray(item) && item.length === 2) {
     const [expr, alias] = item;
     if (typeof alias === "string" && !alias.startsWith("%")) {
-      // Format expression as string key
-      const exprKey = exprToString(expr as SqlExpr);
+      // Format expression as string key, resolving table aliases
+      const exprKey = exprToStringResolved(expr as SqlExpr, tableAliasMap);
       columnToAlias.set(exprKey, alias);
       return;
     }
@@ -201,9 +209,33 @@ function extractColumnAlias(item: SqlExpr, columnToAlias: Map<string, string>): 
 
   // Expression without alias - try to derive a key
   if (Array.isArray(item)) {
-    const exprKey = exprToString(item);
+    const exprKey = exprToStringResolved(item, tableAliasMap);
     columnToAlias.set(exprKey, exprKey);
   }
+}
+
+/**
+ * Resolve table alias in a column name to actual table name.
+ * "u.id" with u→users becomes "users.id"
+ */
+function resolveColumnName(col: string, tableAliasMap: Map<string, string>): string {
+  if (!col.includes(".")) return col;
+  const dotIdx = col.indexOf(".");
+  const tableAlias = col.substring(0, dotIdx);
+  const column = col.substring(dotIdx + 1);
+  const tableName = tableAliasMap.get(tableAlias) ?? tableAlias;
+  return `${tableName}.${column}`;
+}
+
+/**
+ * Convert expression to string, resolving table aliases.
+ */
+function exprToStringResolved(expr: SqlExpr, tableAliasMap: Map<string, string>): string {
+  if (typeof expr === "string") {
+    return resolveColumnName(expr, tableAliasMap);
+  }
+  // For non-string expressions, use regular exprToString
+  return exprToString(expr);
 }
 
 /**
