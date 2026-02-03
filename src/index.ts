@@ -57,6 +57,16 @@ export {
 
 export type { AliasScope } from "./helpers.js";
 
+// SQL guard (LLM validation)
+export {
+  guardSql,
+  getOperation,
+  collectTables,
+  isTautology,
+} from "./guard.js";
+
+export type { GuardConfig, GuardResult, SqlOperation } from "./guard.js";
+
 // Types
 export type {
   SqlExpr,
