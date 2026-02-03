@@ -163,15 +163,26 @@ describe("guardSql", () => {
   });
 
   describe("LIMIT requirements", () => {
-    it("requires LIMIT when maxRows configured", () => {
+    it("requires LIMIT when requireLimit is true", () => {
       const config: GuardConfig = {
         ...defaultConfig,
-        maxRows: 1000,
+        requireLimit: true,
       };
       const clause = fromSql("SELECT * FROM users");
       const result = guardSql(clause, config);
       assert.strictEqual(result.ok, false);
       assert.ok(result.violations.some(v => v.includes("LIMIT")));
+    });
+
+    it("allows query without LIMIT when requireLimit is false", () => {
+      const config: GuardConfig = {
+        ...defaultConfig,
+        requireLimit: false,
+        maxRows: 1000,
+      };
+      const clause = fromSql("SELECT * FROM users");
+      const result = guardSql(clause, config);
+      assert.strictEqual(result.ok, true);
     });
 
     it("allows query with LIMIT under max", () => {
@@ -193,6 +204,25 @@ describe("guardSql", () => {
       const result = guardSql(clause, config);
       assert.strictEqual(result.ok, false);
       assert.ok(result.violations.some(v => v.includes("exceeds")));
+    });
+
+    it("can require LIMIT and enforce maxRows together", () => {
+      const config: GuardConfig = {
+        ...defaultConfig,
+        requireLimit: true,
+        maxRows: 100,
+      };
+      // No LIMIT - fails
+      let result = guardSql(fromSql("SELECT * FROM users"), config);
+      assert.strictEqual(result.ok, false);
+
+      // LIMIT too high - fails
+      result = guardSql(fromSql("SELECT * FROM users LIMIT 500"), config);
+      assert.strictEqual(result.ok, false);
+
+      // LIMIT ok - passes
+      result = guardSql(fromSql("SELECT * FROM users LIMIT 50"), config);
+      assert.strictEqual(result.ok, true);
     });
   });
 

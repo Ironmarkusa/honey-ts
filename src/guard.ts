@@ -15,7 +15,9 @@ export interface GuardConfig {
   allowedTables: string[];
   /** Operations allowed (select, insert, update, delete) */
   allowedOperations: SqlOperation[];
-  /** Max rows for SELECT (requires LIMIT) */
+  /** Require LIMIT clause on SELECT */
+  requireLimit?: boolean;
+  /** Max rows for SELECT (only checked if LIMIT present) */
   maxRows?: number;
   /** Operations that require a WHERE clause */
   requireWhere?: SqlOperation[];
@@ -84,9 +86,9 @@ export function guardSql(clause: SqlClause, config: GuardConfig): GuardResult {
     violations.push("WHERE clause is always true (tautology)");
   }
 
-  // Check LIMIT requirement for SELECT
-  if (config.maxRows !== undefined && op === "select") {
-    const limitViolation = checkLimit(clause, config.maxRows);
+  // Check LIMIT requirements for SELECT
+  if (op === "select") {
+    const limitViolation = checkLimit(clause, config.requireLimit, config.maxRows);
     if (limitViolation) violations.push(limitViolation);
   }
 
@@ -217,11 +219,14 @@ function isTypedValue(x: unknown, value?: unknown): boolean {
   return true;
 }
 
-function checkLimit(clause: SqlClause, maxRows: number): string | null {
+function checkLimit(clause: SqlClause, requireLimit?: boolean, maxRows?: number): string | null {
   const limit = clause.limit;
 
   if (!limit) {
-    return `SELECT requires LIMIT (max ${maxRows} rows)`;
+    if (requireLimit) {
+      return "SELECT requires LIMIT clause";
+    }
+    return null;
   }
 
   // Extract numeric value from limit
@@ -234,7 +239,7 @@ function checkLimit(clause: SqlClause, maxRows: number): string | null {
     if (typeof val === "number") limitValue = val;
   }
 
-  if (limitValue !== null && limitValue > maxRows) {
+  if (maxRows !== undefined && limitValue !== null && limitValue > maxRows) {
     return `LIMIT ${limitValue} exceeds maximum ${maxRows} rows`;
   }
 
