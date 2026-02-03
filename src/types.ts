@@ -304,8 +304,20 @@ export function isIdent(x: unknown): x is SqlIdent {
     return prefixPattern.test(prefix);
   }
 
-  // Valid SQL identifier pattern: letters, digits, underscores, dots, slashes
-  const validIdentPattern = /^[a-zA-Z_][a-zA-Z0-9_]*(?:[./][a-zA-Z_][a-zA-Z0-9_]*)*$/;
+  // Qualified identifier (table.column) - allow any chars after dot for quoted column names
+  // e.g., "s.Store Name" from CSV headers
+  if (x.includes(".")) {
+    const parts = x.split(".");
+    // First part must be valid identifier (table alias or schema)
+    const firstPartPattern = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+    if (firstPartPattern.test(parts[0]!)) {
+      // Rest can be anything (will be quoted if needed)
+      return parts.slice(1).every(p => p.length > 0);
+    }
+  }
+
+  // Valid SQL identifier pattern: letters, digits, underscores, slashes
+  const validIdentPattern = /^[a-zA-Z_][a-zA-Z0-9_]*(?:\/[a-zA-Z_][a-zA-Z0-9_]*)*$/;
   return validIdentPattern.test(x);
 }
 
