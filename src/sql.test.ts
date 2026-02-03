@@ -326,3 +326,88 @@ describe("Typed values", () => {
     assert.match(sql, /'2024-01-01'::date/);
   });
 });
+
+describe("PostgreSQL infix operators", () => {
+  // Import pg-ops to register operators
+  import("./pg-ops.js");
+
+  it("formats ~* as infix operator", () => {
+    const [sql] = format({
+      select: ["*"],
+      from: "users",
+      where: ["~*", "name", { $: "^john" }],
+    });
+    assert.match(sql, /"name" ~\* \$1/);
+  });
+
+  it("formats ~ as infix operator", () => {
+    const [sql] = format({
+      select: ["*"],
+      from: "users",
+      where: ["~", "email", { $: "^[a-z]+@" }],
+    });
+    assert.match(sql, /"email" ~ \$1/);
+  });
+
+  it("formats JSON operators as infix", () => {
+    const [sql] = format({
+      select: [["->", "data", { $: "name" }]],
+      from: "users",
+    });
+    assert.match(sql, /"data" -> \$1/);
+  });
+
+  it("formats ->> as infix operator", () => {
+    const [sql] = format({
+      select: [["->>", "data", { $: "email" }]],
+      from: "users",
+    });
+    assert.match(sql, /"data" ->> \$1/);
+  });
+
+  it("formats @> as infix operator", () => {
+    const [sql] = format({
+      select: ["*"],
+      from: "users",
+      where: ["@>", "tags", { $: ["admin"] }],
+    });
+    assert.match(sql, /"tags" @> \$1/);
+  });
+
+  it("formats && (array overlap) as infix operator", () => {
+    const [sql] = format({
+      select: ["*"],
+      from: "posts",
+      where: ["&&", "tags", ["array", { $: "sql" }, { $: "typescript" }]],
+    });
+    assert.match(sql, /"tags" && ARRAY\[\$1, \$2\]/);
+  });
+
+  it("formats @@ (text search) as infix operator", () => {
+    const [sql] = format({
+      select: ["*"],
+      from: "articles",
+      where: ["@@", "search_vector", ["%to_tsquery", { $: "hello & world" }]],
+    });
+    assert.match(sql, /"search_vector" @@ TO_TSQUERY\(\$1\)/);
+  });
+
+  it("handles CASE with regex operators", () => {
+    const [sql] = format({
+      select: [
+        [
+          ["case",
+            ["~*", "source", { $: "facebook|fb" }], { $: "facebook" },
+            ["~*", "source", { $: "google" }], { $: "google" },
+            "else", { $: "other" }
+          ],
+          "platform"
+        ]
+      ],
+      from: "leads",
+    }, { inline: true });
+    assert.match(sql, /CASE WHEN "source" ~\* 'facebook\|fb' THEN 'facebook'/);
+    assert.match(sql, /WHEN "source" ~\* 'google' THEN 'google'/);
+    assert.match(sql, /ELSE 'other' END AS "platform"/);
+  });
+});
