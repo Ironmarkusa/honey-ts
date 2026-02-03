@@ -124,6 +124,8 @@ export {
   // Tree walking
   walkClauses,
   injectWhere,
+  // Select manipulation
+  overrideSelects,
 } from "./helpers.js";
 
 // Types

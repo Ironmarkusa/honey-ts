@@ -772,3 +772,110 @@ export function injectWhere(clause: SqlClause, condition: SqlExpr): SqlClause {
     return c;
   });
 }
+
+// ============================================================================
+// Select Manipulation
+// ============================================================================
+
+/**
+ * Get the alias/name of a select item.
+ * - Bare column "email" -> "email"
+ * - Aliased ["email", "email_hash"] -> "email_hash"
+ * - Expression with alias [["%count", "*"], "total"] -> "total"
+ */
+function getSelectAlias(item: SqlExpr): string | null {
+  // Bare column string
+  if (typeof item === "string") {
+    // Handle qualified names like "u.email" -> "email"
+    const parts = item.split(".");
+    return parts[parts.length - 1] ?? null;
+  }
+
+  // Array form: could be [expr, alias] or just an expression
+  if (Array.isArray(item) && item.length === 2) {
+    const second = item[1];
+    // If second element is a string identifier (not starting with %), it's an alias
+    if (typeof second === "string" && !second.startsWith("%")) {
+      return second;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Override select items by alias/column name.
+ *
+ * Matches select items by their alias (or column name for bare columns)
+ * and replaces the expression while preserving the alias.
+ *
+ * @example
+ * ```ts
+ * // LLM generates: SELECT email AS email_hash FROM users
+ * const clause = fromSql("SELECT email AS email_hash FROM users");
+ *
+ * // Override with your computation
+ * const fixed = overrideSelects(clause, {
+ *   email_hash: ["%sha256", ["%lower", ["%trim", "email"]]]
+ * });
+ *
+ * // Result: SELECT SHA256(LOWER(TRIM(email))) AS email_hash FROM users
+ * ```
+ *
+ * @example
+ * ```ts
+ * // Also works for bare columns
+ * const clause = { select: ["id", "email"], from: "users" };
+ * const fixed = overrideSelects(clause, {
+ *   email: ["%sha256", "email"]  // Replaces bare "email" with expression
+ * });
+ * // Result: SELECT id, SHA256(email) AS email FROM users
+ * ```
+ */
+export function overrideSelects(
+  clause: SqlClause,
+  overrides: Record<string, SqlExpr>
+): SqlClause {
+  const result = { ...clause };
+
+  // Handle all select variants
+  for (const key of ["select", "select-distinct", "select-distinct-on"] as const) {
+    const selectValue = result[key];
+    if (!selectValue) continue;
+
+    if (key === "select-distinct-on") {
+      // Format: [onExprs, ...selectExprs]
+      const arr = selectValue as SqlExpr[];
+      const onExprs = arr[0];
+      const selectExprs = arr.slice(1);
+      const transformed = transformSelectItems(selectExprs, overrides);
+      result[key] = [onExprs, ...transformed];
+    } else {
+      // Regular select or select-distinct
+      const items = Array.isArray(selectValue) ? selectValue : [selectValue];
+      result[key] = transformSelectItems(items as SqlExpr[], overrides);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Transform select items, applying overrides by alias.
+ */
+function transformSelectItems(
+  items: SqlExpr[],
+  overrides: Record<string, SqlExpr>
+): SqlExpr[] {
+  return items.map((item) => {
+    const alias = getSelectAlias(item);
+
+    if (alias && alias in overrides) {
+      const newExpr = overrides[alias];
+      // Return [newExpr, alias] to preserve the alias
+      return [newExpr, alias] as SqlExpr;
+    }
+
+    return item;
+  });
+}
