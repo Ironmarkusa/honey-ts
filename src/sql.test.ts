@@ -10,31 +10,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert";
 import {
   format,
-  select,
-  from,
-  where,
-  merge,
-  insertInto,
-  values,
-  update,
-  set,
-  deleteFrom,
-  join,
-  leftJoin,
-  orderBy,
-  limit,
-  offset,
   raw,
   param,
-  lift,
-  groupBy,
-  having,
-  onConflict,
-  doUpdateSet,
-  doNothing,
-  returning,
-  with_,
-  union,
 } from "./index.js";
 
 describe("format", () => {
@@ -163,30 +140,6 @@ describe("format", () => {
       );
       assert.strictEqual(sql, 'DELETE FROM "users" WHERE "id" = $1');
       assert.deepStrictEqual(params, [1]);
-    });
-  });
-
-  describe("Helper functions", () => {
-    it("builds query with helpers", () => {
-      const query = merge(
-        select("id", "name"),
-        from("users"),
-        where(["=", "active", {$: true}])
-      );
-      const [sql, ...params] = format(query);
-      assert.match(sql, /SELECT "id", "name" FROM "users" WHERE "active" = \$1/);
-      assert.deepStrictEqual(params, [true]);
-    });
-
-    it("combines multiple where clauses with AND", () => {
-      const query = merge(
-        select("*"),
-        from("users"),
-        where(["=", "status", {$: "active"}]),
-        where([">", "age", {$: 18}])
-      );
-      const [sql, ...params] = format(query);
-      assert.match(sql, /WHERE.*AND/);
     });
   });
 

@@ -1,10 +1,10 @@
 /**
- * Tests for helper functions.
+ * Tests for query manipulation helpers.
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { overrideSelects, merge, where, injectWhere } from "./index.js";
+import { overrideSelects, injectWhere } from "./index.js";
 import type { SqlClause } from "./types.js";
 
 describe("overrideSelects", () => {
@@ -238,33 +238,6 @@ describe("overrideSelects", () => {
   });
 });
 
-describe("merge", () => {
-  it("merges select clauses", () => {
-    const a = { select: ["id"] };
-    const b = { select: ["name"] };
-    const result = merge(a, b);
-    assert.deepStrictEqual(result.select, ["id", "name"]);
-  });
-
-  it("ANDs where clauses", () => {
-    const a = { where: ["=", "a", { $: 1 }] };
-    const b = { where: ["=", "b", { $: 2 }] };
-    const result = merge(a, b);
-    assert.deepStrictEqual(result.where, [
-      "and",
-      ["=", "a", { $: 1 }],
-      ["=", "b", { $: 2 }],
-    ]);
-  });
-
-  it("replaces scalar values", () => {
-    const a = { limit: { $: 10 } };
-    const b = { limit: { $: 20 } };
-    const result = merge(a, b);
-    assert.deepStrictEqual(result.limit, { $: 20 });
-  });
-});
-
 describe("injectWhere", () => {
   it("injects into main query", () => {
     const clause: SqlClause = {
@@ -275,6 +248,22 @@ describe("injectWhere", () => {
     const result = injectWhere(clause, ["=", "tenant_id", { $: "t1" }]);
 
     assert.deepStrictEqual(result.where, ["=", "tenant_id", { $: "t1" }]);
+  });
+
+  it("ANDs with existing where", () => {
+    const clause: SqlClause = {
+      select: ["*"],
+      from: "users",
+      where: ["=", "active", { $: true }],
+    };
+
+    const result = injectWhere(clause, ["=", "tenant_id", { $: "t1" }]);
+
+    assert.deepStrictEqual(result.where, [
+      "and",
+      ["=", "active", { $: true }],
+      ["=", "tenant_id", { $: "t1" }],
+    ]);
   });
 
   it("injects into subqueries", () => {

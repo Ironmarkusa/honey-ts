@@ -5,24 +5,21 @@
  *
  * @example
  * ```ts
- * import { format, select, from, where, merge } from 'honey-ts';
+ * import { toSql, fromSql, injectWhere, overrideSelects, raw } from 'honey-ts';
  *
- * // Data-first approach
- * const query = {
- *   select: ["id", "name"],
- *   from: "users",
- *   where: ["=", "active", true]
- * };
- * const [sql, ...params] = format(query);
- * // => ["SELECT id, name FROM users WHERE active = $1", true]
+ * // LLM generates SQL
+ * const clause = fromSql("SELECT u.email FROM users u WHERE status = 'active'");
  *
- * // Builder approach
- * const query2 = merge(
- *   select("id", "name"),
- *   from("users"),
- *   where(["=", "active", true])
- * );
- * const [sql2, ...params2] = format(query2);
+ * // Override computed columns using schema table names
+ * const fixed = overrideSelects(clause, {
+ *   "users.email": raw("SHA256(LOWER(TRIM(u.email)))")
+ * });
+ *
+ * // Inject tenant isolation into all subqueries
+ * const secured = injectWhere(fixed, ["=", "tenant_id", { $: tenantId }]);
+ *
+ * // Back to parameterized SQL
+ * const [sql, ...params] = toSql(secured);
  * ```
  *
  * Port of: https://github.com/seancorfield/honeysql
@@ -32,7 +29,7 @@
 // Core SQL formatting
 export {
   format,
-  format as toSql,  // Alias for symmetry with fromSql
+  format as toSql,
   formatExpr,
   formatDsl,
   formatExprList,
@@ -45,86 +42,15 @@ export {
   raw,
   param,
   lift,
-  mapEquals,
 } from "./sql.js";
 
 // SQL parsing
 export { fromSql, fromSqlMulti, normalizeSql } from "./parser.js";
 
-// Helper functions (builder pattern)
+// Query manipulation
 export {
-  // SELECT
-  select,
-  selectDistinct,
-  selectDistinctOn,
-  // FROM
-  from,
-  // WHERE / HAVING
-  where,
-  having,
-  // JOIN
-  join,
-  leftJoin,
-  rightJoin,
-  innerJoin,
-  outerJoin,
-  fullJoin,
-  crossJoin,
-  // GROUP BY / ORDER BY
-  groupBy,
-  orderBy,
-  // LIMIT / OFFSET
-  limit,
-  offset,
-  // INSERT
-  insertInto,
-  replaceInto,
-  values,
-  columns,
-  // UPDATE
-  update,
-  set,
-  // DELETE
-  delete_ as del,
-  delete_,
-  deleteFrom,
-  truncate,
-  // WITH (CTE)
-  with_ as withCte,
-  with_,
-  withRecursive,
-  // Set operations
-  union,
-  unionAll,
-  intersect,
-  except,
-  // UPSERT
-  onConflict,
-  onConstraint,
-  doNothing,
-  doUpdateSet,
-  // RETURNING
-  returning,
-  // Locking
-  for_ as forLock,
-  for_,
-  lock,
-  // Window
-  window,
-  partitionBy,
-  // DDL
-  createTable,
-  withColumns,
-  dropTable,
-  alterTable,
-  addColumn,
-  dropColumn,
-  // Utility
-  merge,
-  // Tree walking
   walkClauses,
   injectWhere,
-  // Select manipulation
   overrideSelects,
 } from "./helpers.js";
 
