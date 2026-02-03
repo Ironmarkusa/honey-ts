@@ -9,6 +9,10 @@
  * 5. Convert back to SQL
  * 6. Validate second SQL is parseable
  * 7. Assert both SQL strings match (normalized)
+ *
+ * New syntax:
+ * - Plain strings are identifiers: "id", "users"
+ * - Values use {$: value}: {$: "active"}, {$: 42}
  */
 
 import { describe, it } from "node:test";
@@ -21,15 +25,6 @@ import type { SqlClause, SqlExpr } from "./types.js";
 // ============================================================================
 // Validation
 // ============================================================================
-
-function isValidSql(sql: string): boolean {
-  try {
-    parse(sql);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function assertValidSql(sql: string, context: string): void {
   try {
@@ -46,24 +41,23 @@ function assertValidSql(sql: string, context: string): void {
 // Simple identifier names (valid SQL identifiers)
 const identName = fc.stringMatching(/^[a-z][a-z0-9_]{0,10}$/);
 
-// Column identifier with : prefix
-const columnIdent = identName.map((name) => `:${name}`);
+// Column identifier (plain string)
+const columnIdent = identName;
 
-// Table identifier with : prefix
-const tableIdent = identName.map((name) => `:${name}`);
+// Table identifier (plain string)
+const tableIdent = identName;
 
 // Qualified column (table.column)
 const qualifiedColumn = fc.tuple(identName, identName).map(([t, c]) => `${t}.${c}`);
 
-// Any column reference
-const columnRef = fc.oneof(columnIdent, qualifiedColumn);
+// Typed value wrapper
+const typedValue = <T>(arb: fc.Arbitrary<T>) => arb.map((v) => ({ $: v }));
 
-// Literal values
+// Literal values wrapped in {$: value}
 const literal = fc.oneof(
-  fc.integer({ min: -1000, max: 1000 }),
-  // Avoid problematic strings - no quotes, backslashes, or special chars
-  fc.stringMatching(/^[a-zA-Z0-9 _-]{1,20}$/),
-  fc.boolean(),
+  typedValue(fc.integer({ min: -1000, max: 1000 })),
+  typedValue(fc.stringMatching(/^[a-zA-Z0-9 _-]{1,20}$/)),
+  typedValue(fc.boolean()),
   fc.constant(null)
 );
 
@@ -71,7 +65,6 @@ const literal = fc.oneof(
 const comparisonOp = fc.constantFrom("=", "<>", "<", ">", "<=", ">=");
 
 // Simple comparison expression: [op, column, literal]
-// Use IS/IS NOT for null comparisons
 const comparisonExpr: fc.Arbitrary<SqlExpr> = fc.tuple(
   comparisonOp,
   columnIdent,
@@ -89,7 +82,6 @@ const booleanOp = fc.constantFrom("and", "or");
 // Simple WHERE expression (no deep nesting to start)
 const simpleWhereExpr: fc.Arbitrary<SqlExpr> = fc.oneof(
   comparisonExpr,
-  // AND/OR of two comparisons
   fc.tuple(booleanOp, comparisonExpr, comparisonExpr).map(([op, left, right]) => [op, left, right])
 );
 
@@ -101,9 +93,7 @@ const selectItem: fc.Arbitrary<SqlExpr> = fc.oneof(
   columnIdent,
   qualifiedColumn,
   fc.constant("*"),
-  // Aggregate on column
   fc.tuple(aggregateFn, columnIdent).map(([fn, col]) => [fn, col]),
-  // COUNT(*)
   fc.constant(["%count", "*"] as SqlExpr)
 );
 
@@ -147,8 +137,8 @@ const selectWithOrderBy: fc.Arbitrary<SqlClause> = fc.record({
 const selectWithLimit: fc.Arbitrary<SqlClause> = fc.record({
   select: selectList,
   from: tableIdent,
-  limit: fc.integer({ min: 1, max: 100 }),
-  offset: fc.integer({ min: 0, max: 100 }),
+  limit: typedValue(fc.integer({ min: 1, max: 100 })),
+  offset: typedValue(fc.integer({ min: 0, max: 100 })),
 });
 
 // SELECT with GROUP BY
@@ -161,22 +151,6 @@ const selectWithGroupBy: fc.Arbitrary<SqlClause> = fc.tuple(
   "group-by": groupCols,
 }));
 
-// Full SELECT with multiple clauses
-const fullSelect: fc.Arbitrary<SqlClause> = fc.record({
-  select: selectList,
-  from: tableIdent,
-  where: fc.option(simpleWhereExpr, { nil: undefined }),
-  "order-by": fc.option(orderByList, { nil: undefined }),
-  limit: fc.option(fc.integer({ min: 1, max: 100 }), { nil: undefined }),
-}).map((clause) => {
-  // Remove undefined keys
-  const result: SqlClause = { select: clause.select, from: clause.from };
-  if (clause.where) result.where = clause.where;
-  if (clause["order-by"]) result["order-by"] = clause["order-by"];
-  if (clause.limit) result.limit = clause.limit;
-  return result;
-});
-
 // SELECT with JOIN
 const selectWithJoin: fc.Arbitrary<SqlClause> = fc.tuple(
   tableIdent,
@@ -184,16 +158,30 @@ const selectWithJoin: fc.Arbitrary<SqlClause> = fc.tuple(
   identName,
   identName
 ).chain(([table1, table2, alias1, alias2]) => {
-  // Ensure different aliases
   const a1 = alias1;
   const a2 = alias1 === alias2 ? alias2 + "2" : alias2;
   return fc.constant({
     select: [`${a1}.id`, `${a2}.id`],
-    from: [[table1, `:${a1}`]],
+    from: [[table1, a1]],
     join: [
-      [[table2, `:${a2}`], ["=", `${a1}.id`, `${a2}.fk`]]
+      [[table2, a2], ["=", `${a1}.id`, `${a2}.fk`]]
     ],
   } as SqlClause);
+});
+
+// Full SELECT with multiple clauses
+const fullSelect: fc.Arbitrary<SqlClause> = fc.record({
+  select: selectList,
+  from: tableIdent,
+  where: fc.option(simpleWhereExpr, { nil: undefined }),
+  "order-by": fc.option(orderByList, { nil: undefined }),
+  limit: fc.option(typedValue(fc.integer({ min: 1, max: 100 })), { nil: undefined }),
+}).map((clause) => {
+  const result: SqlClause = { select: clause.select, from: clause.from };
+  if (clause.where) result.where = clause.where;
+  if (clause["order-by"]) result["order-by"] = clause["order-by"];
+  if (clause.limit) result.limit = clause.limit;
+  return result;
 });
 
 // DELETE statement
@@ -219,14 +207,13 @@ const insertStmt: fc.Arbitrary<SqlClause> = fc.tuple(
   fc.array(identName, { minLength: 1, maxLength: 5 }),
   fc.array(literal, { minLength: 1, maxLength: 5 })
 ).chain(([table, cols, vals]) => {
-  // Ensure values array matches columns length
   const values = vals.slice(0, cols.length);
   while (values.length < cols.length) {
     values.push(null);
   }
   return fc.constant({
     "insert-into": table,
-    columns: cols.map((c) => `:${c}`),
+    columns: cols,
     values: [values],
   } as SqlClause);
 });

@@ -15,7 +15,7 @@ import type {
   FormatOptions,
   DialectConfig,
 } from "./types.js";
-import { isIdent, isParam, isRaw, isLift, isClause, isExprArray } from "./types.js";
+import { isIdent, isParam, isRaw, isLift, isClause, isExprArray, isTypedValue } from "./types.js";
 
 // ============================================================================
 // String Utilities (ported from honey.sql.util)
@@ -179,11 +179,6 @@ export function sqlKw(k: string | symbol | null | undefined): string {
     return n.substring(1);
   }
 
-  // Strip leading colon (keyword indicator)
-  if (n.startsWith(":")) {
-    n = n.substring(1);
-  }
-
   // Strip leading % (function call indicator)
   if (n.startsWith("%")) {
     n = n.substring(1);
@@ -236,12 +231,7 @@ export function formatEntity(
   const { dialect, options } = ctx;
   const { quoted, quotedSnake, quotedAlways } = options;
 
-  let name = typeof e === "symbol" ? (e.description ?? "") : e;
-
-  // Strip leading colon (keyword indicator)
-  if (name.startsWith(":")) {
-    name = name.substring(1);
-  }
+  const name = typeof e === "symbol" ? (e.description ?? "") : e;
 
   // Handle quoted alias (starts with ')
   if (opts.aliased && name.startsWith("'")) {
@@ -403,7 +393,29 @@ export function formatExpr(expr: SqlExpr, ctx: FormatContext, opts: { nested?: b
     return ["?", expr.__lift];
   }
 
-  // Literal value
+  // Typed value: {$: value} or {type: value}
+  if (isTypedValue(expr)) {
+    const keys = Object.keys(expr);
+    const type = keys[0]!;
+    let value = (expr as Record<string, unknown>)[type];
+
+    // Auto-stringify objects for jsonb
+    if (type === "jsonb" && typeof value === "object" && value !== null) {
+      value = JSON.stringify(value);
+    }
+
+    if (options.inline) {
+      const sqlVal = sqlizeValue(value);
+      return type === "$" ? [sqlVal] : [`${sqlVal}::${type}`];
+    }
+    if (options.numbered) {
+      const [sql, ...params] = addNumberedParam(value, ctx);
+      return type === "$" ? [sql, ...params] : [`${sql}::${type}`, ...params];
+    }
+    return type === "$" ? ["?", value] : [`?::${type}`, value];
+  }
+
+  // Literal value (numbers, booleans - strings are now identifiers)
   if (options.inline) {
     return [sqlizeValue(expr)];
   }
@@ -434,12 +446,6 @@ function formatVar(x: SqlIdent, ctx: FormatContext, opts: { aliased?: boolean; d
     const fn = parts[0]!.toUpperCase().replace(/-/g, "_");
     const args = parts.slice(1).map((p) => formatEntity(p, ctx));
     return [`${fn}(${args.join(", ")})`];
-  }
-
-  // ?param shorthand
-  if (name.startsWith("?")) {
-    const paramName = name.substring(1);
-    return formatParamRef(paramName, ctx);
   }
 
   // Regular entity

@@ -29,6 +29,14 @@ export type SqlRaw = { __raw: string | (string | SqlExpr)[] };
 export type SqlLift = { __lift: unknown };
 
 /**
+ * Typed value - becomes a parameterized value with optional cast
+ * {$: "active"} → $1
+ * {text: "hello"} → $1::text
+ * {jsonb: {foo: "bar"}} → $1::jsonb
+ */
+export type SqlTypedValue = { [type: string]: unknown };
+
+/**
  * SQL Expression - recursive type for SQL expressions
  * Can be: identifier, literal value, or [operator, ...args]
  */
@@ -273,42 +281,25 @@ export const FormatOptionsSchema = z.object({
 /**
  * Check if a value is a SQL identifier (column/table name).
  *
- * Strings are identifiers if they:
- * - Start with ":" (like Clojure keywords) - RECOMMENDED for explicit identifiers
- * - Contain "." but only valid identifier chars (qualified names like "table.column")
- * - Contain "/" but only valid identifier chars (namespaced like "schema/table")
- * - Are "*" (select all)
+ * ALL plain strings are identifiers.
+ * Values must be wrapped: {$: "value"} or {type: value}
  *
- * Symbols are always identifiers.
- * Plain strings like "hello", "alice@example.com" are treated as values.
+ * Valid identifiers:
+ * - Simple names: "users", "id", "created_at"
+ * - Qualified names: "users.id", "schema.table"
+ * - Select all: "*"
+ * - Function shorthand: "%count", "%sum"
  */
 export function isIdent(x: unknown): x is SqlIdent {
   if (typeof x === "symbol") return true;
   if (typeof x !== "string") return false;
-
-  // Explicit identifier prefix (like Clojure keywords) - RECOMMENDED
-  if (x.startsWith(":")) return true;
-
-  // Select all
+  if (x === "") return false;
   if (x === "*") return true;
-
-  // % function shorthand
   if (x.startsWith("%")) return true;
 
-  // ? parameter shorthand
-  if (x.startsWith("?")) return true;
-
-  // Qualified names (table.column, schema.table) - only if all parts are valid identifiers
-  // Valid identifier chars: letters, digits, underscores
-  // This prevents "alice@example.com" from being treated as an identifier
-  if (x.includes(".") || x.includes("/")) {
-    // Must only contain valid identifier characters plus . and /
-    const validIdentPattern = /^[a-zA-Z_][a-zA-Z0-9_]*(?:[./][a-zA-Z_][a-zA-Z0-9_]*)+$/;
-    return validIdentPattern.test(x);
-  }
-
-  // Everything else is a value
-  return false;
+  // Valid SQL identifier pattern: letters, digits, underscores, dots, slashes
+  const validIdentPattern = /^[a-zA-Z_][a-zA-Z0-9_]*(?:[./][a-zA-Z_][a-zA-Z0-9_]*)*$/;
+  return validIdentPattern.test(x);
 }
 
 export function isParam(x: unknown): x is SqlParam {
@@ -323,6 +314,32 @@ export function isLift(x: unknown): x is SqlLift {
   return typeof x === "object" && x !== null && "__lift" in x;
 }
 
+// SQL clause keys - these are NOT typed values
+const clauseKeys = new Set([
+  "select", "select-distinct", "select-distinct-on",
+  "from", "join", "left-join", "right-join", "inner-join", "outer-join", "full-join", "cross-join",
+  "where", "group-by", "having", "order-by", "limit", "offset",
+  "insert-into", "replace-into", "values", "columns", "set", "update", "delete", "delete-from",
+  "on-conflict", "on-constraint", "do-nothing", "do-update-set",
+  "returning", "with", "with-recursive",
+  "union", "union-all", "intersect", "except", "except-all",
+  "create-table", "drop-table", "alter-table", "truncate",
+  "raw", "nest", "for", "lock", "window", "partition-by",
+]);
+
+/**
+ * Check if value is a typed value like {$: "active"} or {jsonb: {...}}
+ * Must be an object with exactly one key that's not a special key or clause key
+ */
+export function isTypedValue(x: unknown): x is SqlTypedValue {
+  if (typeof x !== "object" || x === null || Array.isArray(x)) return false;
+  const keys = Object.keys(x);
+  if (keys.length !== 1) return false;
+  const key = keys[0]!;
+  // Not a special internal type or a SQL clause key
+  return !key.startsWith("__") && !clauseKeys.has(key);
+}
+
 export function isClause(x: unknown): x is SqlClause {
   return (
     typeof x === "object" &&
@@ -330,7 +347,8 @@ export function isClause(x: unknown): x is SqlClause {
     !Array.isArray(x) &&
     !isParam(x) &&
     !isRaw(x) &&
-    !isLift(x)
+    !isLift(x) &&
+    !isTypedValue(x)
   );
 }
 

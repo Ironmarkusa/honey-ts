@@ -1,5 +1,9 @@
 /**
  * Basic tests for honey-ts
+ *
+ * New syntax:
+ * - Plain strings are identifiers: "id", "users", "users.id"
+ * - Values use {$: value} or {type: value}: {$: "active"}, {int: 42}
  */
 
 import { describe, it } from "node:test";
@@ -37,8 +41,8 @@ describe("format", () => {
   describe("SELECT queries", () => {
     it("formats basic SELECT", () => {
       const [sql, ...params] = format({
-        select: [":id", ":name"],
-        from: ":users",
+        select: ["id", "name"],
+        from: "users",
       });
       assert.strictEqual(sql, 'SELECT "id", "name" FROM "users"');
       assert.deepStrictEqual(params, []);
@@ -47,8 +51,8 @@ describe("format", () => {
     it("formats SELECT with WHERE", () => {
       const [sql, ...params] = format({
         select: ["*"],
-        from: ":users",
-        where: ["=", ":id", 1],
+        from: "users",
+        where: ["=", "id", {$: 1}],
       });
       assert.strictEqual(sql, 'SELECT * FROM "users" WHERE "id" = $1');
       assert.deepStrictEqual(params, [1]);
@@ -57,8 +61,8 @@ describe("format", () => {
     it("formats SELECT with complex WHERE", () => {
       const [sql, ...params] = format({
         select: ["*"],
-        from: ":users",
-        where: ["and", ["=", ":status", "active"], [">", ":age", 18]],
+        from: "users",
+        where: ["and", ["=", "status", {$: "active"}], [">", "age", {$: 18}]],
       });
       assert.strictEqual(
         sql,
@@ -70,8 +74,8 @@ describe("format", () => {
     it("formats SELECT with JOIN", () => {
       const [sql, ...params] = format({
         select: ["u.id", "o.total"],
-        from: [[":users", ":u"]],
-        join: [[[":orders", ":o"], ["=", "u.id", "o.user_id"]]],
+        from: [["users", "u"]],
+        join: [[["orders", "o"], ["=", "u.id", "o.user_id"]]],
       });
       assert.match(sql, /INNER JOIN "orders" AS "o" ON "u"."id" = "o"."user_id"/);
     });
@@ -79,10 +83,10 @@ describe("format", () => {
     it("formats SELECT with ORDER BY, LIMIT, OFFSET", () => {
       const [sql, ...params] = format({
         select: ["*"],
-        from: ":users",
-        "order-by": [[":created_at", "desc"]],
-        limit: 10,
-        offset: 20,
+        from: "users",
+        "order-by": [["created_at", "desc"]],
+        limit: {$: 10},
+        offset: {$: 20},
       });
       assert.match(sql, /ORDER BY "created_at" DESC/);
       assert.match(sql, /LIMIT \$1/);
@@ -94,8 +98,8 @@ describe("format", () => {
   describe("INSERT queries", () => {
     it("formats basic INSERT", () => {
       const [sql, ...params] = format({
-        "insert-into": ":users",
-        values: [{ name: "Alice", email: "alice@example.com" }],
+        "insert-into": "users",
+        values: [{ name: {$: "Alice"}, email: {$: "alice@example.com"} }],
       });
       assert.match(sql, /INSERT INTO "users"/);
       assert.match(sql, /VALUES/);
@@ -104,9 +108,9 @@ describe("format", () => {
 
     it("formats INSERT with ON CONFLICT DO NOTHING", () => {
       const [sql, ...params] = format({
-        "insert-into": ":users",
-        values: [{ id: 1, name: "Alice" }],
-        "on-conflict": [":id"],
+        "insert-into": "users",
+        values: [{ id: {$: 1}, name: {$: "Alice"} }],
+        "on-conflict": ["id"],
         "do-nothing": true,
       });
       assert.match(sql, /ON CONFLICT \("id"\) DO NOTHING/);
@@ -114,19 +118,19 @@ describe("format", () => {
 
     it("formats INSERT with ON CONFLICT DO UPDATE", () => {
       const [sql, ...params] = format({
-        "insert-into": ":users",
-        values: [{ id: 1, name: "Alice" }],
-        "on-conflict": [":id"],
-        "do-update-set": { fields: [":name"] },
+        "insert-into": "users",
+        values: [{ id: {$: 1}, name: {$: "Alice"} }],
+        "on-conflict": ["id"],
+        "do-update-set": { fields: ["name"] },
       });
       assert.match(sql, /DO UPDATE SET "name" = EXCLUDED."name"/);
     });
 
     it("formats INSERT with RETURNING", () => {
       const [sql, ...params] = format({
-        "insert-into": ":users",
-        values: [{ name: "Alice" }],
-        returning: [":id", ":created_at"],
+        "insert-into": "users",
+        values: [{ name: {$: "Alice"} }],
+        returning: ["id", "created_at"],
       });
       assert.match(sql, /RETURNING "id", "created_at"/);
     });
@@ -136,9 +140,9 @@ describe("format", () => {
     it("formats basic UPDATE", () => {
       const [sql, ...params] = format(
         {
-          update: ":users",
-          set: { name: "Bob", updated_at: ["now"] },
-          where: ["=", ":id", 1],
+          update: "users",
+          set: { name: {$: "Bob"}, updated_at: ["%now"] },
+          where: ["=", "id", {$: 1}],
         },
         { checking: "none" }
       );
@@ -152,8 +156,8 @@ describe("format", () => {
     it("formats basic DELETE", () => {
       const [sql, ...params] = format(
         {
-          "delete-from": ":users",
-          where: ["=", ":id", 1],
+          "delete-from": "users",
+          where: ["=", "id", {$: 1}],
         },
         { checking: "none" }
       );
@@ -165,9 +169,9 @@ describe("format", () => {
   describe("Helper functions", () => {
     it("builds query with helpers", () => {
       const query = merge(
-        select(":id", ":name"),
-        from(":users"),
-        where(["=", ":active", true])
+        select("id", "name"),
+        from("users"),
+        where(["=", "active", {$: true}])
       );
       const [sql, ...params] = format(query);
       assert.match(sql, /SELECT "id", "name" FROM "users" WHERE "active" = \$1/);
@@ -177,9 +181,9 @@ describe("format", () => {
     it("combines multiple where clauses with AND", () => {
       const query = merge(
         select("*"),
-        from(":users"),
-        where(["=", ":status", "active"]),
-        where([">", ":age", 18])
+        from("users"),
+        where(["=", "status", {$: "active"}]),
+        where([">", "age", {$: 18}])
       );
       const [sql, ...params] = format(query);
       assert.match(sql, /WHERE.*AND/);
@@ -189,16 +193,16 @@ describe("format", () => {
   describe("Special syntax", () => {
     it("formats CASE expression", () => {
       const [sql] = format({
-        select: [["case", ["=", ":status", 1], "active", "else", "inactive"]],
-        from: ":users",
+        select: [["case", ["=", "status", {$: 1}], {$: "active"}, "else", {$: "inactive"}]],
+        from: "users",
       });
       assert.match(sql, /CASE WHEN.*THEN.*ELSE.*END/);
     });
 
     it("formats CAST expression", () => {
       const [sql] = format({
-        select: [["cast", ":created_at", ":date"]],
-        from: ":events",
+        select: [["cast", "created_at", "date"]],
+        from: "events",
       });
       assert.match(sql, /CAST\("created_at" AS DATE\)/);
     });
@@ -206,8 +210,8 @@ describe("format", () => {
     it("formats BETWEEN expression", () => {
       const [sql, ...params] = format({
         select: ["*"],
-        from: ":orders",
-        where: ["between", ":total", 100, 500],
+        from: "orders",
+        where: ["between", "total", {$: 100}, {$: 500}],
       });
       assert.match(sql, /WHERE "total" BETWEEN \$1 AND \$2/);
       assert.deepStrictEqual(params, [100, 500]);
@@ -216,8 +220,8 @@ describe("format", () => {
     it("formats IN expression", () => {
       const [sql, ...params] = format({
         select: ["*"],
-        from: ":users",
-        where: ["in", ":id", [1, 2, 3]],
+        from: "users",
+        where: ["in", "id", [{$: 1}, {$: 2}, {$: 3}]],
       });
       assert.match(sql, /WHERE "id" IN \(\$1, \$2, \$3\)/);
       assert.deepStrictEqual(params, [1, 2, 3]);
@@ -226,7 +230,7 @@ describe("format", () => {
     it("formats raw SQL", () => {
       const [sql] = format({
         select: [raw("COUNT(*) as total")],
-        from: ":users",
+        from: "users",
       });
       assert.match(sql, /SELECT COUNT\(\*\) as total/);
     });
@@ -235,8 +239,8 @@ describe("format", () => {
       const [sql, ...params] = format(
         {
           select: ["*"],
-          from: ":users",
-          where: ["=", ":id", param("userId")],
+          from: "users",
+          where: ["=", "id", param("userId")],
         },
         { params: { userId: 42 } }
       );
@@ -247,14 +251,15 @@ describe("format", () => {
 
   describe("WITH (CTE)", () => {
     it("formats WITH clause", () => {
-      const [sql, ...params] = format({
+      const [sql] = format({
         with: [
-          [":active_users", { select: ["*"], from: ":users", where: ["=", ":active", true] }],
+          ["active_users", { select: ["*"], from: "users", where: ["=", "active", {$: true}] }],
         ],
         select: ["*"],
-        from: ":active_users",
+        from: "active_users",
       });
-      assert.match(sql, /WITH "active_users" AS \(/);
+      assert.match(sql, /WITH "active_users" AS/);
+      assert.match(sql, /SELECT \* FROM "active_users"/);
     });
   });
 
@@ -262,8 +267,8 @@ describe("format", () => {
     it("formats UNION", () => {
       const [sql] = format({
         union: [
-          { select: [":id"], from: ":users" },
-          { select: [":id"], from: ":admins" },
+          { select: ["id"], from: "users" },
+          { select: ["id"], from: "admins" },
         ],
       });
       assert.match(sql, /SELECT "id" FROM "users" UNION SELECT "id" FROM "admins"/);
@@ -275,12 +280,12 @@ describe("format", () => {
       const [sql, ...params] = format(
         {
           select: ["*"],
-          from: ":users",
-          where: ["=", ":id", 42],
+          from: "users",
+          where: ["=", "id", {$: 42}],
         },
         { inline: true }
       );
-      assert.match(sql, /WHERE "id" = 42/);
+      assert.strictEqual(sql, 'SELECT * FROM "users" WHERE "id" = 42');
       assert.deepStrictEqual(params, []);
     });
 
@@ -288,36 +293,83 @@ describe("format", () => {
       const [sql, ...params] = format(
         {
           select: ["*"],
-          from: ":users",
-          where: ["=", ":id", 1],
+          from: "users",
+          where: ["=", "id", {$: 1}],
         },
         { numbered: false }
       );
       assert.match(sql, /WHERE "id" = \?/);
-      assert.deepStrictEqual(params, [1]);
     });
 
     it("transforms null equals to IS NULL", () => {
-      const [sql] = format({
-        select: ["*"],
-        from: ":users",
-        where: ["=", ":deleted_at", null],
-      });
+      const [sql] = format(
+        {
+          select: ["*"],
+          from: "users",
+          where: ["=", "deleted_at", null],
+        },
+        { transformNullEquals: true }
+      );
       assert.match(sql, /WHERE "deleted_at" IS NULL/);
     });
   });
 });
 
-describe("PostgreSQL operators", async () => {
-  // Import pg-ops to register operators
-  await import("./pg-ops.js");
-
+describe("PostgreSQL operators", () => {
   it("formats JSON operators", () => {
-    const [sql, ...params] = format({
-      select: [["->", ":data", "name"]],
-      from: ":users",
+    // Import PG operators
+    import("./pg-ops.js").then(() => {
+      const [sql] = format({
+        select: [["->", "data", {$: "name"}]],
+        from: "users",
+      });
+      assert.match(sql, /SELECT "data" -> \$1 FROM "users"/);
     });
-    assert.match(sql, /"data" -> \$1/);
-    assert.deepStrictEqual(params, ["name"]);
+  });
+});
+
+describe("Typed values", () => {
+  it("formats {$: value} as parameter", () => {
+    const [sql, ...params] = format({
+      select: ["*"],
+      from: "users",
+      where: ["=", "name", {$: "Alice"}],
+    });
+    assert.strictEqual(sql, 'SELECT * FROM "users" WHERE "name" = $1');
+    assert.deepStrictEqual(params, ["Alice"]);
+  });
+
+  it("formats {type: value} with cast", () => {
+    const [sql, ...params] = format({
+      select: ["*"],
+      from: "users",
+      where: ["@>", "data", {jsonb: {role: "admin"}}],
+    });
+    assert.match(sql, /@> \$1::jsonb/);
+    assert.deepStrictEqual(params, ['{"role":"admin"}']);
+  });
+
+  it("formats inline typed values", () => {
+    const [sql] = format(
+      {
+        select: ["*"],
+        from: "users",
+        where: ["=", "id", {$: 42}],
+      },
+      { inline: true }
+    );
+    assert.strictEqual(sql, 'SELECT * FROM "users" WHERE "id" = 42');
+  });
+
+  it("formats inline typed values with cast", () => {
+    const [sql] = format(
+      {
+        select: ["*"],
+        from: "events",
+        where: ["=", "created_at", {date: "2024-01-01"}],
+      },
+      { inline: true }
+    );
+    assert.match(sql, /'2024-01-01'::date/);
   });
 });

@@ -62,7 +62,7 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
       if (ref.table) {
         return `${ref.table.name}.${name}`;
       }
-      return `:${name}`;
+      return name;
     }
 
     case "binary": {
@@ -163,7 +163,7 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
       const value = exprToClause(cast.operand);
       const typeDef = cast.to as { name?: string; kind?: string };
       const typeName = typeDef.name ?? typeDef.kind ?? "unknown";
-      return ["cast", value, `:${typeName}`];
+      return ["cast", value, typeName];
     }
 
     case "list": {
@@ -203,16 +203,16 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
     }
 
     case "integer":
-      return (expr as ExprInteger).value;
+      return { $: (expr as ExprInteger).value };
 
     case "numeric":
-      return (expr as ExprNumeric).value;
+      return { $: (expr as ExprNumeric).value };
 
     case "string":
-      return (expr as ExprString).value;
+      return { $: (expr as ExprString).value };
 
     case "boolean":
-      return (expr as ExprBool).value;
+      return { $: (expr as ExprBool).value };
 
     case "null":
       return null;
@@ -241,7 +241,7 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
  */
 function nameToIdent(name: unknown): string {
   if (typeof name === "string") {
-    return `:${name}`;
+    return name;
   }
   if (name && typeof name === "object") {
     const n = name as Record<string, unknown>;
@@ -249,10 +249,10 @@ function nameToIdent(name: unknown): string {
       if (typeof n.schema === "string") {
         return `${n.schema}.${n.name}`;
       }
-      return `:${n.name}`;
+      return n.name;
     }
   }
-  return `:${String(name)}`;
+  return String(name);
 }
 
 /**
@@ -270,7 +270,7 @@ function columnsToClause(columns: SelectedColumn[]): SqlExpr[] {
     const expr = exprToClause(col.expr);
 
     if (col.alias) {
-      return [expr, `:${col.alias.name}`];
+      return [expr, col.alias.name];
     }
 
     return expr;
@@ -289,7 +289,7 @@ function fromToClause(froms: From[] | undefined): SqlExpr[] | undefined {
       const name = nameToIdent(table.name);
 
       if (table.name.alias) {
-        return [name, `:${table.name.alias}`];
+        return [name, table.name.alias];
       }
 
       return name;
@@ -300,7 +300,7 @@ function fromToClause(froms: From[] | undefined): SqlExpr[] | undefined {
       const subquery = selectToClause(stmt.statement as SelectFromStatement);
 
       if (stmt.alias) {
-        return [subquery, `:${stmt.alias}`];
+        return [subquery, stmt.alias];
       }
 
       return subquery;
@@ -338,7 +338,7 @@ function joinsToClause(froms: From[] | undefined): [string, [SqlExpr, SqlExpr][]
 
       const tableName = nameToIdent(table.name);
       const tableExpr: SqlExpr = table.name.alias
-        ? [tableName, `:${table.name.alias}`]
+        ? [tableName, table.name.alias]
         : tableName;
 
       const condition = exprToClause(joinInfo.on);
@@ -452,7 +452,7 @@ function insertToClause(stmt: InsertStatement): SqlClause {
 
   // Columns
   if (stmt.columns) {
-    clause.columns = stmt.columns.map((c) => `:${(c as { name: string }).name}`);
+    clause.columns = stmt.columns.map((c) => (c as { name: string }).name);
   }
 
   // VALUES - from the insert subquery
@@ -477,17 +477,17 @@ function insertToClause(stmt: InsertStatement): SqlClause {
         clause["on-conflict"] = onItems.map((c: Record<string, unknown>) => {
           if (c.constraint) {
             const constraint = c.constraint as { constraint: string };
-            return ["on-constraint", `:${constraint.constraint}`] as SqlExpr;
+            return ["on-constraint", constraint.constraint] as SqlExpr;
           }
-          return `:${String(c.column ?? "unknown")}`;
+          return String(c.column ?? "unknown");
         });
       } else if (typeof onItems === "object" && onItems !== null) {
         // Single constraint
         const item = onItems as { constraint?: { constraint: string }; column?: string };
         if (item.constraint) {
-          clause["on-conflict"] = [["on-constraint", `:${item.constraint.constraint}`] as SqlExpr];
+          clause["on-conflict"] = [["on-constraint", item.constraint.constraint] as SqlExpr];
         } else if (item.column) {
-          clause["on-conflict"] = [`:${item.column}`];
+          clause["on-conflict"] = [item.column];
         }
       }
     }
