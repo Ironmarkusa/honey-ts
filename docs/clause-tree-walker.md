@@ -209,13 +209,15 @@ function applyRLS(clause: SqlClause, userId: string): SqlClause {
   return walkClauses(clause, (c) => {
     // Different tables have different RLS rules
     if (c.from === "user_data") {
-      return merge(c, where(["=", "owner_id", { $: userId }]));
+      const condition = ["=", "owner_id", { $: userId }];
+      return { ...c, where: c.where ? ["and", c.where, condition] : condition };
     }
     if (c.from === "shared_data") {
-      return merge(c, where(["or",
+      const condition = ["or",
         ["=", "owner_id", { $: userId }],
         ["=", "public", { $: true }]
-      ]));
+      ];
+      return { ...c, where: c.where ? ["and", c.where, condition] : condition };
     }
     return c;
   });

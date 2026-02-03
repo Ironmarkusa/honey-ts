@@ -3,7 +3,7 @@
 **SQL as data structures for TypeScript** - A port of [HoneySQL](https://github.com/seancorfield/honeysql) for PostgreSQL.
 
 ```typescript
-import { format, fromSql, merge, select, from, where, injectWhere } from 'honey-ts';
+import { format, fromSql, injectWhere } from 'honey-ts';
 
 // Build SQL from data structures
 const query = {
@@ -75,22 +75,6 @@ const query = {
 const [sql, ...params] = format(query);
 // sql: SELECT id, name FROM users WHERE (status = $1) AND (created_at > $2) ORDER BY created_at DESC LIMIT $3
 // params: ["active", Date, 10]
-```
-
-### Builder Pattern
-
-```typescript
-import { merge, select, from, where, orderBy, limit } from 'honey-ts';
-
-const query = merge(
-  select("id", "name"),
-  from("users"),
-  where(["=", "status", { $: "active" }]),
-  orderBy(["created_at", "desc"]),
-  limit({ $: 10 })
-);
-
-const [sql, ...params] = format(query);
 ```
 
 ### Round-Trip Parsing
