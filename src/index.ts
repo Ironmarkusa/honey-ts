@@ -54,9 +54,11 @@ export {
   overrideSelects,
   getTableAliases,
   getSelectAliases,
+  analyzeSelects,
+  getReferencedColumns,
 } from "./helpers.js";
 
-export type { AliasScope } from "./helpers.js";
+export type { AliasScope, SelectItemAnalysis, SelectAnalysisScope } from "./helpers.js";
 
 // SQL guard (LLM validation)
 export {

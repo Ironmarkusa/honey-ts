@@ -4,7 +4,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { overrideSelects, injectWhere, getSelectAliases, fromSql } from "./index.js";
+import { overrideSelects, injectWhere, getSelectAliases, analyzeSelects, getReferencedColumns, fromSql } from "./index.js";
 import type { SqlClause } from "./types.js";
 
 describe("overrideSelects", () => {
@@ -385,5 +385,158 @@ describe("getSelectAliases", () => {
     const tree = getSelectAliases(clause);
 
     assert.strictEqual(tree.aliases.size, 0);
+  });
+});
+
+describe("analyzeSelects", () => {
+  it("identifies passthrough columns", () => {
+    const clause = fromSql("SELECT id, name FROM users");
+    const analysis = analyzeSelects(clause);
+
+    assert.strictEqual(analysis.items.length, 2);
+    assert.strictEqual(analysis.items[0]!.alias, "id");
+    assert.strictEqual(analysis.items[0]!.isPassthrough, true);
+    assert.deepStrictEqual(analysis.items[0]!.sources, ["id"]);
+  });
+
+  it("identifies aliased passthrough columns", () => {
+    const clause = fromSql("SELECT id AS user_id FROM users");
+    const analysis = analyzeSelects(clause);
+
+    assert.strictEqual(analysis.items[0]!.alias, "user_id");
+    assert.strictEqual(analysis.items[0]!.isPassthrough, true);
+    assert.deepStrictEqual(analysis.items[0]!.sources, ["id"]);
+  });
+
+  it("identifies CASE as complex", () => {
+    const clause = fromSql(`
+      SELECT CASE WHEN status = 'active' THEN 'yes' ELSE 'no' END AS is_active
+      FROM users
+    `);
+    const analysis = analyzeSelects(clause);
+
+    assert.strictEqual(analysis.items[0]!.alias, "is_active");
+    assert.strictEqual(analysis.items[0]!.isPassthrough, false);
+    assert.deepStrictEqual(analysis.items[0]!.sources, ["status"]);
+  });
+
+  it("identifies concatenation with multiple sources", () => {
+    const clause: SqlClause = {
+      select: [[["||", "first_name", ["||", { $: " " }, "last_name"]], "full_name"]],
+      from: "users",
+    };
+    const analysis = analyzeSelects(clause);
+
+    assert.strictEqual(analysis.items[0]!.alias, "full_name");
+    assert.strictEqual(analysis.items[0]!.isPassthrough, false);
+    assert.ok(analysis.items[0]!.sources.includes("first_name"));
+    assert.ok(analysis.items[0]!.sources.includes("last_name"));
+  });
+
+  it("identifies aggregate functions as complex", () => {
+    const clause = fromSql("SELECT COUNT(*) AS total FROM users");
+    const analysis = analyzeSelects(clause);
+
+    assert.strictEqual(analysis.items[0]!.alias, "total");
+    assert.strictEqual(analysis.items[0]!.isPassthrough, false);
+  });
+
+  it("handles qualified column names", () => {
+    const clause = fromSql("SELECT u.email AS email_hash FROM users u");
+    const analysis = analyzeSelects(clause);
+
+    assert.strictEqual(analysis.items[0]!.alias, "email_hash");
+    assert.strictEqual(analysis.items[0]!.isPassthrough, true);
+    assert.deepStrictEqual(analysis.items[0]!.sources, ["email"]);
+  });
+
+  it("handles subqueries in children", () => {
+    const clause = fromSql(`
+      SELECT id, (SELECT COUNT(*) FROM orders WHERE user_id = u.id) AS order_count
+      FROM users u
+    `);
+    const analysis = analyzeSelects(clause);
+
+    assert.strictEqual(analysis.items.length, 2);
+    assert.strictEqual(analysis.children.length, 1);
+    assert.strictEqual(analysis.children[0]!.location, "select");
+  });
+
+  it("handles CTEs", () => {
+    const clause = fromSql(`
+      WITH active AS (SELECT id, email FROM users WHERE active = true)
+      SELECT id AS user_id FROM active
+    `);
+    const analysis = analyzeSelects(clause);
+
+    assert.strictEqual(analysis.children.length, 1);
+    assert.strictEqual(analysis.children[0]!.location, "with:active");
+    assert.strictEqual(analysis.children[0]!.items.length, 2);
+  });
+
+  it("skips star selects", () => {
+    const clause = fromSql("SELECT * FROM users");
+    const analysis = analyzeSelects(clause);
+
+    assert.strictEqual(analysis.items.length, 0);
+  });
+
+  it("handles COALESCE with multiple sources", () => {
+    const clause: SqlClause = {
+      select: [[["%coalesce", "nickname", "first_name"], "display_name"]],
+      from: "users",
+    };
+    const analysis = analyzeSelects(clause);
+
+    assert.strictEqual(analysis.items[0]!.alias, "display_name");
+    assert.strictEqual(analysis.items[0]!.isPassthrough, false);
+    assert.ok(analysis.items[0]!.sources.includes("nickname"));
+    assert.ok(analysis.items[0]!.sources.includes("first_name"));
+  });
+});
+
+describe("getReferencedColumns", () => {
+  it("extracts column from simple reference", () => {
+    const cols = getReferencedColumns("email");
+    assert.deepStrictEqual(cols, ["email"]);
+  });
+
+  it("extracts column from qualified reference", () => {
+    const cols = getReferencedColumns("u.email");
+    assert.deepStrictEqual(cols, ["email"]);
+  });
+
+  it("extracts columns from CASE expression", () => {
+    const expr = ["case", ["=", "status", { $: "active" }], { $: "yes" }, "else", { $: "no" }];
+    const cols = getReferencedColumns(expr);
+    assert.deepStrictEqual(cols, ["status"]);
+  });
+
+  it("extracts columns from binary expression", () => {
+    const expr = ["||", "first_name", ["||", { $: " " }, "last_name"]];
+    const cols = getReferencedColumns(expr);
+    assert.ok(cols.includes("first_name"));
+    assert.ok(cols.includes("last_name"));
+  });
+
+  it("extracts columns from function call", () => {
+    const expr = ["%coalesce", "nickname", "first_name", { $: "Unknown" }];
+    const cols = getReferencedColumns(expr);
+    assert.ok(cols.includes("nickname"));
+    assert.ok(cols.includes("first_name"));
+  });
+
+  it("ignores typed values", () => {
+    const expr = ["=", "id", { $: 42 }];
+    const cols = getReferencedColumns(expr);
+    assert.deepStrictEqual(cols, ["id"]);
+  });
+
+  it("ignores operators", () => {
+    const expr = ["and", ["=", "a", { $: 1 }], ["=", "b", { $: 2 }]];
+    const cols = getReferencedColumns(expr);
+    assert.ok(cols.includes("a"));
+    assert.ok(cols.includes("b"));
+    assert.ok(!cols.includes("and"));
   });
 });

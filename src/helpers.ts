@@ -453,6 +453,279 @@ export function injectWhere(clause: SqlClause, condition: SqlExpr): SqlClause {
 }
 
 // ============================================================================
+// Select Analysis
+// ============================================================================
+
+/**
+ * Analysis of a single SELECT item.
+ */
+export interface SelectItemAnalysis {
+  /** Output column name/alias */
+  alias: string;
+  /** Source columns this output depends on */
+  sources: string[];
+  /** True if just a column rename, false if transformed */
+  isPassthrough: boolean;
+  /** Original expression */
+  expr: SqlExpr;
+}
+
+/**
+ * Analysis of SELECT items in a query scope.
+ */
+export interface SelectAnalysisScope {
+  /** Analyzed SELECT items for this scope */
+  items: SelectItemAnalysis[];
+  /** Human-readable location: "root", "with:cte_name", "from[0]", etc. */
+  location: string;
+  /** Nested scopes (subqueries, CTEs, UNIONs) */
+  children: SelectAnalysisScope[];
+}
+
+/**
+ * Analyze SELECT items in a query, returning source dependencies and complexity.
+ *
+ * @example
+ * ```ts
+ * const clause = fromSql(`
+ *   SELECT s."Email" AS email_hash,
+ *          CASE WHEN s."Source" LIKE '%fb%' THEN 'meta' END AS platform,
+ *          s."FirstName" || ' ' || s."LastName" AS full_name
+ *   FROM staging.imports s
+ * `);
+ * const analysis = analyzeSelects(clause);
+ *
+ * analysis.items[0]  // { alias: "email_hash", sources: ["Email"], isPassthrough: true, ... }
+ * analysis.items[1]  // { alias: "platform", sources: ["Source"], isPassthrough: false, ... }
+ * analysis.items[2]  // { alias: "full_name", sources: ["FirstName", "LastName"], isPassthrough: false, ... }
+ * ```
+ */
+export function analyzeSelects(clause: SqlClause, location = "root"): SelectAnalysisScope {
+  const tableAliasMap = extractTableAliases(clause);
+  const scope: SelectAnalysisScope = {
+    items: extractSelectAnalysis(clause, tableAliasMap),
+    location,
+    children: [],
+  };
+
+  // WITH / WITH RECURSIVE - each CTE is a scope
+  for (const key of ["with", "with-recursive"] as const) {
+    const ctes = clause[key] as [string, SqlClause][] | undefined;
+    if (ctes) {
+      for (const [name, cte] of ctes) {
+        scope.children.push(analyzeSelects(cte, `${key}:${name}`));
+      }
+    }
+  }
+
+  // UNION / INTERSECT / EXCEPT - each branch is a scope
+  for (const key of ["union", "union-all", "intersect", "except", "except-all"] as const) {
+    const branches = clause[key] as SqlClause[] | undefined;
+    if (branches) {
+      branches.forEach((branch, i) => {
+        scope.children.push(analyzeSelects(branch, `${key}[${i}]`));
+      });
+    }
+  }
+
+  // FROM - may contain subqueries
+  if (clause.from) {
+    collectAnalysisScopes(clause.from as SqlExpr, "from", scope.children);
+  }
+
+  // WHERE - may contain subqueries
+  if (clause.where) {
+    collectAnalysisScopes(clause.where as SqlExpr, "where", scope.children);
+  }
+
+  // SELECT - may contain scalar subqueries
+  if (clause.select) {
+    collectAnalysisScopes(clause.select as SqlExpr, "select", scope.children);
+  }
+
+  return scope;
+}
+
+/**
+ * Extract analysis for all SELECT items in a clause.
+ */
+function extractSelectAnalysis(
+  clause: SqlClause,
+  tableAliasMap: Map<string, string>
+): SelectItemAnalysis[] {
+  const items: SelectItemAnalysis[] = [];
+
+  // Handle all select variants
+  for (const key of ["select", "select-distinct"] as const) {
+    const selectValue = clause[key];
+    if (!selectValue) continue;
+
+    const selectItems = Array.isArray(selectValue) ? selectValue : [selectValue];
+    for (const item of selectItems) {
+      const analysis = analyzeSelectItem(item as SqlExpr, tableAliasMap);
+      if (analysis) items.push(analysis);
+    }
+  }
+
+  // select-distinct-on: [onExprs, ...selectExprs]
+  if (clause["select-distinct-on"]) {
+    const arr = clause["select-distinct-on"] as SqlExpr[];
+    for (let i = 1; i < arr.length; i++) {
+      const analysis = analyzeSelectItem(arr[i] as SqlExpr, tableAliasMap);
+      if (analysis) items.push(analysis);
+    }
+  }
+
+  return items;
+}
+
+/**
+ * Analyze a single SELECT item.
+ */
+function analyzeSelectItem(
+  item: SqlExpr,
+  tableAliasMap: Map<string, string>
+): SelectItemAnalysis | null {
+  // Skip * and qualified *
+  if (item === "*") return null;
+  if (typeof item === "string" && item.endsWith(".*")) return null;
+
+  // Bare column: "id" or "u.id"
+  if (typeof item === "string") {
+    const columnName = item.includes(".") ? item.split(".").pop()! : item;
+    return {
+      alias: columnName,
+      sources: [columnName],
+      isPassthrough: true,
+      expr: item,
+    };
+  }
+
+  // [expr, alias] form
+  if (Array.isArray(item) && item.length === 2) {
+    const [expr, alias] = item;
+    if (typeof alias === "string" && !alias.startsWith("%")) {
+      const sources = getReferencedColumns(expr as SqlExpr, tableAliasMap);
+      const isPassthrough = typeof expr === "string" && !expr.startsWith("%");
+      return {
+        alias,
+        sources,
+        isPassthrough,
+        expr: expr as SqlExpr,
+      };
+    }
+  }
+
+  // Complex expression without explicit alias
+  if (Array.isArray(item)) {
+    const sources = getReferencedColumns(item, tableAliasMap);
+    const exprStr = exprToString(item);
+    return {
+      alias: exprStr,
+      sources,
+      isPassthrough: false,
+      expr: item,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Get all column references from an expression.
+ * Returns just the column names (without table prefix).
+ */
+export function getReferencedColumns(
+  expr: SqlExpr,
+  tableAliasMap?: Map<string, string>
+): string[] {
+  const cols: string[] = [];
+
+  function walk(e: SqlExpr): void {
+    // Column reference
+    if (typeof e === "string") {
+      // Skip operators, functions, keywords
+      if (e.startsWith("%")) return;
+      if (e === "*") return;
+      if (e === "else") return;
+      if (["and", "or", "not", "is", "in", "like", "between"].includes(e.toLowerCase())) return;
+
+      // Extract column name
+      const colName = e.includes(".") ? e.split(".").pop()! : e;
+      if (colName && !cols.includes(colName)) {
+        cols.push(colName);
+      }
+      return;
+    }
+
+    // Recurse into arrays
+    if (Array.isArray(e)) {
+      for (let i = 0; i < e.length; i++) {
+        // Skip first element if it's an operator/function
+        if (i === 0 && typeof e[0] === "string" &&
+            (e[0].startsWith("%") || isOperator(e[0]))) {
+          continue;
+        }
+        walk(e[i] as SqlExpr);
+      }
+      return;
+    }
+
+    // Don't descend into subqueries - different scope
+    if (isClauseMap(e)) return;
+
+    // Handle typed values - they're not column references
+    if (typeof e === "object" && e !== null) {
+      if ("$" in e || "__raw" in e || "__param" in e || "__lift" in e) return;
+    }
+  }
+
+  walk(expr);
+  return cols;
+}
+
+/**
+ * Check if a string is a SQL operator.
+ */
+function isOperator(s: string): boolean {
+  const operators = [
+    "=", "<>", "!=", "<", ">", "<=", ">=",
+    "+", "-", "*", "/", "||",
+    "and", "or", "not",
+    "is", "is-not", "in", "not-in",
+    "like", "ilike", "between", "not-between",
+    "case", "case-expr",
+    "->", "->>", "@>", "<@", "?", "&&", "@@",
+    "~", "~*", "!~", "!~*",
+    "cast", "array", "exists", "any", "all",
+  ];
+  return operators.includes(s.toLowerCase());
+}
+
+/**
+ * Recursively find subqueries and collect their analysis scopes.
+ */
+function collectAnalysisScopes(
+  expr: SqlExpr,
+  basePath: string,
+  children: SelectAnalysisScope[],
+  index = { n: 0 }
+): void {
+  if (isClauseMap(expr)) {
+    const location = index.n === 0 ? basePath : `${basePath}[${index.n}]`;
+    index.n++;
+    children.push(analyzeSelects(expr, location));
+    return;
+  }
+
+  if (Array.isArray(expr)) {
+    for (const item of expr) {
+      collectAnalysisScopes(item as SqlExpr, basePath, children, index);
+    }
+  }
+}
+
+// ============================================================================
 // Select Manipulation
 // ============================================================================
 
