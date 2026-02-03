@@ -21,6 +21,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "prepare": "npm run build",
     "test": "node --test --import tsx src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

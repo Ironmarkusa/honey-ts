@@ -604,14 +604,21 @@ function formatIn(
 
 function formatFnCall(fn: string, expr: SqlExpr[], ctx: FormatContext): FormatResult {
   const args = expr.slice(1);
-  const fnSql = sqlKw(fn).replace(/ /g, "_");
+  let fnSql = sqlKw(fn).replace(/ /g, "_");
+
+  // Handle DISTINCT aggregates: %count-distinct -> COUNT(DISTINCT ...)
+  let distinctPrefix = "";
+  if (fnSql.endsWith("_DISTINCT")) {
+    fnSql = fnSql.slice(0, -9); // Remove _DISTINCT suffix
+    distinctPrefix = "DISTINCT ";
+  }
 
   if (args.length === 0) {
     return [`${fnSql}()`];
   }
 
   const [sqls, params] = formatExprList(args as SqlExpr[], ctx);
-  return [`${fnSql}(${sqls.join(", ")})`, ...params];
+  return [`${fnSql}(${distinctPrefix}${sqls.join(", ")})`, ...params];
 }
 
 // ============================================================================
@@ -737,23 +744,38 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
     return [`DISTINCT ${sql}`, ...p];
   }],
 
+  // FILTER clause: ["filter", fnCall, condition]
+  ["filter", (k, [fnCall, condition], ctx) => {
+    const [fnSql, ...fnParams] = formatExpr(fnCall!, ctx);
+    const [condSql, ...condParams] = formatExpr(condition!, ctx);
+    return [`${fnSql} FILTER (WHERE ${condSql})`, ...fnParams, ...condParams];
+  }],
+
   // Composite tuple
   ["composite", (k, args, ctx) => {
     const [sqls, params] = formatExprList(args, ctx);
     return [`(${sqls.join(", ")})`, ...params];
   }],
 
-  // ARRAY
+  // ARRAY - handles both ["array", el1, el2, ...] and ["array", [elements], type?]
   ["array", (k, args, ctx) => {
-    const [arr, type] = args;
-    if (isClause(arr)) {
-      // Subquery array
-      const [sql, ...p] = formatDsl(arr, ctx);
+    // Check if first arg is a clause (subquery array)
+    if (args.length === 1 && isClause(args[0])) {
+      const [sql, ...p] = formatDsl(args[0] as SqlClause, ctx);
       return [`ARRAY(${sql})`, ...p];
     }
-    const [sqls, params] = formatExprList(arr as SqlExpr[], ctx);
-    const typeSuffix = type ? `::${sqlKw(type as string)}[]` : "";
-    return [`ARRAY[${sqls.join(", ")}]${typeSuffix}`, ...params];
+
+    // Check if first arg is an array (old format: ["array", [elements], type?])
+    if (args.length >= 1 && Array.isArray(args[0]) && !isClause(args[0])) {
+      const [arr, type] = args;
+      const [sqls, params] = formatExprList(arr as SqlExpr[], ctx);
+      const typeSuffix = type ? `::${sqlKw(type as string)}[]` : "";
+      return [`ARRAY[${sqls.join(", ")}]${typeSuffix}`, ...params];
+    }
+
+    // New format from parser: ["array", el1, el2, el3, ...]
+    const [sqls, params] = formatExprList(args as SqlExpr[], ctx);
+    return [`ARRAY[${sqls.join(", ")}]`, ...params];
   }],
 
   // NEST (parenthesize)
@@ -805,35 +827,43 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
   }],
 
   // OVER (window function)
+  // Format: ["over", fnCall, overSpec] where overSpec has partition-by and order-by
   ["over", (k, args, ctx) => {
-    const results: string[] = [];
-    const allParams: unknown[] = [];
+    const [fnCall, overSpec] = args as [SqlExpr, SqlClause?];
 
-    // args is array of [expr, partition, alias?]
-    for (const arg of args) {
-      if (!Array.isArray(arg)) continue;
-      const [expr, partition, alias] = arg as [SqlExpr, SqlExpr?, SqlExpr?];
-      const [sqlE, ...pE] = formatExpr(expr, ctx);
-      let sqlP: string;
-      let pP: unknown[] = [];
+    // Format the function call
+    const [fnSql, ...fnParams] = formatExpr(fnCall, ctx);
 
-      if (partition == null || isClause(partition)) {
-        const result = formatDsl((partition ?? {}) as SqlClause, ctx, { nested: true });
-        sqlP = result[0];
-        pP = result.slice(1);
-      } else {
-        sqlP = formatEntity(partition as SqlIdent, ctx);
+    // Format the OVER clause parts
+    const overParts: string[] = [];
+    const overParams: unknown[] = [];
+
+    if (overSpec) {
+      // PARTITION BY
+      const partitionBy = overSpec["partition-by"] as SqlExpr[] | undefined;
+      if (partitionBy && partitionBy.length > 0) {
+        const [sqls, params] = formatExprList(partitionBy, ctx);
+        overParts.push(`PARTITION BY ${sqls.join(", ")}`);
+        overParams.push(...params);
       }
 
-      let sql = `${sqlE} OVER ${sqlP}`;
-      if (alias) {
-        sql += ` AS ${formatEntity(alias as SqlIdent, ctx)}`;
+      // ORDER BY
+      const orderBy = overSpec["order-by"] as [SqlExpr, string][] | undefined;
+      if (orderBy && orderBy.length > 0) {
+        const orderParts: string[] = [];
+        for (const [col, dir] of orderBy) {
+          const [colSql, ...colParams] = formatExpr(col, ctx);
+          // Only add DESC if specified (ASC is the SQL default)
+          const dirStr = dir && dir.toLowerCase() === "desc" ? " DESC" : "";
+          orderParts.push(`${colSql}${dirStr}`);
+          overParams.push(...colParams);
+        }
+        overParts.push(`ORDER BY ${orderParts.join(", ")}`);
       }
-      results.push(sql);
-      allParams.push(...pE, ...pP);
     }
 
-    return [results.join(", "), ...allParams];
+    const overClause = overParts.length > 0 ? `(${overParts.join(" ")})` : "()";
+    return [`${fnSql} OVER ${overClause}`, ...fnParams, ...overParams];
   }],
 
   // INTERVAL
@@ -893,11 +923,15 @@ function formatSelects(k: string, xs: unknown, ctx: FormatContext): FormatResult
   const params: unknown[] = [];
 
   for (const item of items) {
-    // Check for [expr, alias] form - but NOT function calls like ["%count", ":*"]
+    // Check for [expr, alias] form - but NOT function calls like ["%count", "*"]
+    // Alias form: [[expr], alias] or [column, alias] where first element is NOT a function/operator
     const isAliasForm = Array.isArray(item) &&
       item.length === 2 &&
-      !isExprArray(item[0]) &&
-      // First element must not be a function/operator (starts with % or is an operator)
+      // Second element must be a valid alias identifier (not a function name)
+      typeof item[1] === "string" &&
+      isIdent(item[1]) &&
+      !item[1].startsWith("%") &&
+      // First element must NOT be a function/operator that takes item[1] as argument
       !(typeof item[0] === "string" && (item[0].startsWith("%") || infixOps.has(item[0])));
 
     if (isAliasForm) {
@@ -921,6 +955,21 @@ clauseFormatters.set("select", formatSelects);
 clauseFormatters.set("select-distinct", (k, xs, ctx) => {
   const [sql, ...p] = formatSelects("select", xs, ctx);
   return [sql.replace("SELECT", "SELECT DISTINCT"), ...p];
+});
+clauseFormatters.set("select-distinct-on", (k, xs, ctx) => {
+  // Format: [onExprs, ...selectExprs]
+  const arr = xs as SqlExpr[];
+  const onExprs = arr[0] as SqlExpr[];
+  const selectExprs = arr.slice(1);
+
+  const [onSqls, onParams] = formatExprList(onExprs, ctx);
+  const [selectSql, ...selectParams] = formatSelects("select", selectExprs, ctx);
+
+  return [
+    selectSql.replace("SELECT", `SELECT DISTINCT ON (${onSqls.join(", ")})`),
+    ...onParams,
+    ...selectParams,
+  ];
 });
 clauseFormatters.set("from", formatSelects);
 clauseFormatters.set("returning", formatSelects);
@@ -1083,11 +1132,13 @@ clauseFormatters.set("order-by", (k, xs, ctx) => {
     if (Array.isArray(item) && item.length === 2 && typeof item[1] === "string") {
       const [expr, dir] = item as [SqlExpr, string];
       const [sql, ...p] = formatExpr(expr, ctx);
-      sqls.push(`${sql} ${dir.toUpperCase()}`);
+      // Only add direction if it's DESC (ASC is the SQL default)
+      const dirStr = dir.toLowerCase() === "desc" ? " DESC" : "";
+      sqls.push(`${sql}${dirStr}`);
       params.push(...p);
     } else {
       const [sql, ...p] = formatExpr(item as SqlExpr, ctx);
-      sqls.push(`${sql} ASC`);
+      sqls.push(sql);
       params.push(...p);
     }
   }

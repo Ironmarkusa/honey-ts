@@ -297,6 +297,13 @@ export function isIdent(x: unknown): x is SqlIdent {
   if (x === "*") return true;
   if (x.startsWith("%")) return true;
 
+  // Pattern like "u.*" or "schema.table.*" (qualified star)
+  if (x.endsWith(".*")) {
+    const prefix = x.slice(0, -2);
+    const prefixPattern = /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*$/;
+    return prefixPattern.test(prefix);
+  }
+
   // Valid SQL identifier pattern: letters, digits, underscores, dots, slashes
   const validIdentPattern = /^[a-zA-Z_][a-zA-Z0-9_]*(?:[./][a-zA-Z_][a-zA-Z0-9_]*)*$/;
   return validIdentPattern.test(x);

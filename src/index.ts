@@ -121,6 +121,9 @@ export {
   dropColumn,
   // Utility
   merge,
+  // Tree walking
+  walkClauses,
+  injectWhere,
 } from "./helpers.js";
 
 // Types

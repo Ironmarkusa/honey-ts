@@ -672,3 +672,103 @@ export function merge(...clauses: SqlClause[]): SqlClause {
     return acc;
   }, {} as SqlClause);
 }
+
+// ============================================================================
+// Clause Tree Walker
+// ============================================================================
+
+/**
+ * Recursively walk all clause nodes in a query tree, applying a transform.
+ * Handles CTEs, UNIONs, subqueries in FROM/WHERE/SELECT.
+ *
+ * @example
+ * ```ts
+ * // Inject tenant filter into ALL subqueries
+ * const secured = walkClauses(clause, (c) => {
+ *   if (c.from) {
+ *     return merge(c, where(["=", "tenant_id", {$: tenantId}]));
+ *   }
+ *   return c;
+ * });
+ * ```
+ */
+export function walkClauses(
+  clause: SqlClause,
+  transform: (c: SqlClause) => SqlClause
+): SqlClause {
+  const processed: SqlClause = { ...clause };
+
+  // WITH / WITH RECURSIVE - each CTE is a clause
+  for (const key of ["with", "with-recursive"] as const) {
+    if (processed[key]) {
+      processed[key] = (processed[key] as [string, SqlClause][]).map(
+        ([name, cte]) => [name, walkClauses(cte, transform)]
+      );
+    }
+  }
+
+  // UNION / INTERSECT / EXCEPT - array of clauses
+  for (const key of ["union", "union-all", "intersect", "except", "except-all"] as const) {
+    if (processed[key]) {
+      processed[key] = (processed[key] as SqlClause[]).map(
+        (c) => walkClauses(c, transform)
+      );
+    }
+  }
+
+  // FROM - may contain subqueries
+  if (processed.from) {
+    processed.from = walkExprForClauses(processed.from as SqlExpr, transform);
+  }
+
+  // WHERE - may contain subqueries (IN, EXISTS, scalar)
+  if (processed.where) {
+    processed.where = walkExprForClauses(processed.where as SqlExpr, transform);
+  }
+
+  // SELECT - may contain scalar subqueries
+  if (processed.select) {
+    processed.select = walkExprForClauses(processed.select as SqlExpr, transform);
+  }
+
+  // HAVING - may contain subqueries
+  if (processed.having) {
+    processed.having = walkExprForClauses(processed.having as SqlExpr, transform);
+  }
+
+  // Apply transform to this clause
+  return transform(processed);
+}
+
+/** Walk an expression tree, transforming any nested clause maps */
+function walkExprForClauses(
+  expr: SqlExpr,
+  transform: (c: SqlClause) => SqlClause
+): SqlExpr {
+  if (isClauseMap(expr)) {
+    return walkClauses(expr, transform);
+  }
+  if (Array.isArray(expr)) {
+    return expr.map((e) => walkExprForClauses(e as SqlExpr, transform));
+  }
+  return expr;
+}
+
+/**
+ * Inject a WHERE condition into all SELECT queries in the tree.
+ * Convenience wrapper around walkClauses for tenant isolation.
+ *
+ * @example
+ * ```ts
+ * const secured = injectWhere(clause, ["=", "tenant_id", {$: tenantId}]);
+ * ```
+ */
+export function injectWhere(clause: SqlClause, condition: SqlExpr): SqlClause {
+  return walkClauses(clause, (c) => {
+    // Only inject into clauses that query from tables
+    if (c.from || c["delete-from"] || c.update) {
+      return merge(c, where(condition));
+    }
+    return c;
+  });
+}

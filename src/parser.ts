@@ -129,10 +129,45 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
 
     case "call": {
       const call = expr as ExprCall;
+      const callAny = call as unknown as {
+        distinct?: string;
+        filter?: Expr;
+        over?: { partitionBy?: Expr[]; orderBy?: OrderByStatement[] };
+      };
+
       // Use % prefix for function names (HoneySQL convention)
-      const fnName = `%${call.function.name.toLowerCase()}`;
+      let fnName = `%${call.function.name.toLowerCase()}`;
+
+      // Handle DISTINCT in aggregate: COUNT(DISTINCT x)
+      if (callAny.distinct) {
+        fnName = `%${call.function.name.toLowerCase()}-distinct`;
+      }
+
       const args = call.args.map(exprToClause);
-      return [fnName, ...args];
+      let fnCall: SqlExpr[] = [fnName, ...args];
+
+      // Handle FILTER clause: COUNT(*) FILTER (WHERE ...)
+      if (callAny.filter) {
+        fnCall = ["filter", fnCall, exprToClause(callAny.filter)];
+      }
+
+      // Handle window functions with OVER clause
+      if (callAny.over) {
+        const overSpec: SqlClause = {};
+        if (callAny.over.partitionBy && callAny.over.partitionBy.length > 0) {
+          overSpec["partition-by"] = callAny.over.partitionBy.map(exprToClause);
+        }
+        if (callAny.over.orderBy && callAny.over.orderBy.length > 0) {
+          overSpec["order-by"] = callAny.over.orderBy.map((ob) => {
+            const col = exprToClause(ob.by);
+            const dir = ob.order?.toLowerCase() ?? "asc";
+            return [col, dir];
+          });
+        }
+        return ["over", fnCall, overSpec];
+      }
+
+      return fnCall;
     }
 
     case "case": {
@@ -297,7 +332,13 @@ function fromToClause(froms: From[] | undefined): SqlExpr[] | undefined {
 
     if (f.type === "statement") {
       const stmt = f as FromStatement;
-      const subquery = selectToClause(stmt.statement as SelectFromStatement);
+      const stmtAny = stmt as unknown as { lateral?: boolean };
+      let subquery: SqlExpr = selectToClause(stmt.statement as SelectFromStatement);
+
+      // Handle LATERAL subqueries
+      if (stmtAny.lateral) {
+        subquery = ["lateral", subquery];
+      }
 
       if (stmt.alias) {
         return [subquery, stmt.alias];
@@ -377,7 +418,13 @@ function selectToClause(stmt: SelectFromStatement): SqlClause {
 
   // SELECT columns
   if (stmt.columns) {
-    if (stmt.distinct) {
+    const distinct = stmt.distinct as unknown;
+    if (Array.isArray(distinct) && distinct.length > 0) {
+      // DISTINCT ON (expr, ...)
+      const onExprs = distinct.map(exprToClause);
+      const cols = columnsToClause(stmt.columns);
+      clause["select-distinct-on"] = [onExprs, ...(Array.isArray(cols) ? cols : [cols])];
+    } else if (distinct) {
       clause["select-distinct"] = columnsToClause(stmt.columns);
     } else {
       clause.select = columnsToClause(stmt.columns);
@@ -472,23 +519,22 @@ function insertToClause(stmt: InsertStatement): SqlClause {
     const onConflict = stmt.onConflict as unknown as Record<string, unknown>;
 
     if (onConflict.on) {
-      const onItems = onConflict.on as unknown;
-      if (Array.isArray(onItems)) {
-        clause["on-conflict"] = onItems.map((c: Record<string, unknown>) => {
-          if (c.constraint) {
-            const constraint = c.constraint as { constraint: string };
-            return ["on-constraint", constraint.constraint] as SqlExpr;
-          }
-          return String(c.column ?? "unknown");
-        });
-      } else if (typeof onItems === "object" && onItems !== null) {
-        // Single constraint
-        const item = onItems as { constraint?: { constraint: string }; column?: string };
-        if (item.constraint) {
-          clause["on-conflict"] = [["on-constraint", item.constraint.constraint] as SqlExpr];
-        } else if (item.column) {
-          clause["on-conflict"] = [item.column];
-        }
+      const onItems = onConflict.on as unknown as {
+        type?: string;
+        exprs?: Expr[];
+        constraint?: { constraint: string };
+        column?: string;
+      };
+
+      if (onItems.type === "on expr" && onItems.exprs) {
+        // ON CONFLICT (col1, col2, ...)
+        clause["on-conflict"] = onItems.exprs.map(exprToClause);
+      } else if (onItems.constraint) {
+        clause["on-conflict"] = [["on-constraint", onItems.constraint.constraint] as SqlExpr];
+      } else if (Array.isArray(onItems)) {
+        clause["on-conflict"] = (onItems as Array<{ column?: string }>).map((c) =>
+          String(c.column ?? "unknown")
+        );
       }
     }
 
@@ -496,7 +542,7 @@ function insertToClause(stmt: InsertStatement): SqlClause {
       clause["do-nothing"] = true;
     } else if (typeof onConflict.do === "object" && onConflict.do !== null) {
       const doAction = onConflict.do as { type?: string; sets?: SetStatement[] };
-      if (doAction.type === "do update" && doAction.sets) {
+      if (doAction.sets) {
         const sets: Record<string, SqlExpr> = {};
         for (const s of doAction.sets) {
           sets[(s.column as { name: string }).name] = exprToClause(s.value);
@@ -584,10 +630,36 @@ function statementToClause(stmt: Statement): SqlClause {
       return updateToClause(stmt as UpdateStatement);
     case "delete":
       return deleteToClause(stmt as DeleteStatement);
+    case "with":
+      return withToClause(stmt as WithStatement);
     default:
       // For unsupported statements, return raw SQL
       return { raw: astToSql.statement(stmt) };
   }
+}
+
+/** CTE (WITH) statement */
+type WithStatement = {
+  type: "with";
+  bind: Array<{
+    alias: { name: string };
+    statement: SelectFromStatement;
+  }>;
+  in: SelectFromStatement;
+};
+
+function withToClause(stmt: WithStatement): SqlClause {
+  const clause: SqlClause = {};
+
+  // Convert each CTE
+  clause.with = stmt.bind.map((cte) => [
+    cte.alias.name,
+    selectToClause(cte.statement),
+  ] as [string, SqlClause]);
+
+  // Merge the main query
+  const mainQuery = selectToClause(stmt.in);
+  return { ...clause, ...mainQuery };
 }
 
 // ============================================================================
