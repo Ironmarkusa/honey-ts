@@ -22,6 +22,9 @@ import { parse } from "pgsql-ast-parser";
 import { format, fromSql, normalizeSql } from "./index.js";
 import type { SqlClause, SqlExpr } from "./types.js";
 
+// Import PostgreSQL operators for pg-specific tests
+import "./pg-ops.js";
+
 // ============================================================================
 // Validation
 // ============================================================================
@@ -497,6 +500,178 @@ const insertOnConflict: fc.Arbitrary<SqlClause> = fc.tuple(
 });
 
 // ============================================================================
+// Quoted Identifiers with Spaces (CSV column names)
+// ============================================================================
+
+// Column names with spaces (CSV headers)
+const spacedColumnName = fc.stringMatching(/^[A-Z][a-zA-Z0-9 ]{1,15}$/).filter(s => s.includes(" "));
+
+// Table alias (single letter or short name)
+const tableAlias = fc.stringMatching(/^[a-z][a-z0-9]{0,2}$/);
+
+// Qualified column with spaces: alias."Column Name"
+const qualifiedSpacedColumn = fc.tuple(tableAlias, spacedColumnName)
+  .map(([alias, col]) => `${alias}.${col}`);
+
+// Schema name
+const schemaName = fc.constantFrom("staging", "public", "raw", "import");
+
+// Schema-qualified table
+const schemaQualifiedTable = fc.tuple(schemaName, tableIdent)
+  .map(([schema, table]) => `${schema}.${table}`);
+
+// SELECT with quoted identifiers (CSV-style)
+const selectWithQuotedIdents: fc.Arbitrary<SqlClause> = fc.tuple(
+  fc.array(qualifiedSpacedColumn, { minLength: 1, maxLength: 4 }),
+  schemaQualifiedTable,
+  tableAlias
+).map(([cols, table, alias]) => ({
+  select: cols.map((col, i) => [col, `col${i}`]),
+  from: [[table, alias]],
+} as SqlClause));
+
+// SELECT with mixed normal and quoted columns
+const selectMixedColumns: fc.Arbitrary<SqlClause> = fc.tuple(
+  qualifiedSpacedColumn,
+  fc.tuple(tableAlias, identName).map(([a, c]) => `${a}.${c}`),
+  schemaQualifiedTable,
+  tableAlias
+).map(([spacedCol, normalCol, table, alias]) => ({
+  select: [[spacedCol, "spaced"], normalCol],
+  from: [[table, alias]],
+} as SqlClause));
+
+// WHERE with quoted identifier
+const selectQuotedWhere: fc.Arbitrary<SqlClause> = fc.tuple(
+  qualifiedSpacedColumn,
+  schemaQualifiedTable,
+  tableAlias,
+  literal
+).map(([col, table, alias, val]) => ({
+  select: ["*"],
+  from: [[table, alias]],
+  where: ["=", col, val],
+} as SqlClause));
+
+// ============================================================================
+// PostgreSQL Operators
+// ============================================================================
+
+// Regex pattern
+const regexPattern = fc.stringMatching(/^\^?[a-z]{1,5}(\|[a-z]{1,5})*\$?$/);
+
+// JSON key
+const jsonKey = fc.stringMatching(/^[a-z][a-z_]{0,10}$/);
+
+// SELECT with regex operator (~*)
+const selectRegexOp: fc.Arbitrary<SqlClause> = fc.tuple(
+  columnIdent,
+  tableIdent,
+  regexPattern
+).map(([col, table, pattern]) => ({
+  select: ["*"],
+  from: table,
+  where: ["~*", col, { $: pattern }],
+} as SqlClause));
+
+// SELECT with case-sensitive regex (~)
+const selectCaseSensitiveRegex: fc.Arbitrary<SqlClause> = fc.tuple(
+  columnIdent,
+  tableIdent,
+  regexPattern
+).map(([col, table, pattern]) => ({
+  select: ["*"],
+  from: table,
+  where: ["~", col, { $: pattern }],
+} as SqlClause));
+
+// SELECT with JSON -> operator
+const selectJsonGet: fc.Arbitrary<SqlClause> = fc.tuple(
+  columnIdent,
+  tableIdent,
+  jsonKey
+).map(([col, table, key]) => ({
+  select: [["->", col, { $: key }]],
+  from: table,
+} as SqlClause));
+
+// SELECT with JSON ->> operator
+const selectJsonGetText: fc.Arbitrary<SqlClause> = fc.tuple(
+  columnIdent,
+  tableIdent,
+  jsonKey
+).map(([col, table, key]) => ({
+  select: [["->>", col, { $: key }]],
+  from: table,
+} as SqlClause));
+
+// WHERE with JSONB @> contains
+const selectJsonContains: fc.Arbitrary<SqlClause> = fc.tuple(
+  columnIdent,
+  tableIdent,
+  jsonKey,
+  fc.stringMatching(/^[a-z]{1,10}$/)
+).map(([col, table, key, val]) => ({
+  select: ["*"],
+  from: table,
+  where: ["@>", col, { jsonb: { [key]: val } }],
+} as SqlClause));
+
+// WHERE with array overlap (&&)
+const selectArrayOverlap: fc.Arbitrary<SqlClause> = fc.tuple(
+  columnIdent,
+  tableIdent,
+  fc.array(typedValue(fc.stringMatching(/^[a-z]{1,8}$/)), { minLength: 2, maxLength: 4 })
+).map(([col, table, vals]) => ({
+  select: ["*"],
+  from: table,
+  where: ["&&", col, ["array", ...vals]],
+} as SqlClause));
+
+// WHERE with array contains (@>) using ARRAY syntax
+const selectArrayContains: fc.Arbitrary<SqlClause> = fc.tuple(
+  columnIdent,
+  tableIdent,
+  fc.array(typedValue(fc.stringMatching(/^[a-z]{1,8}$/)), { minLength: 1, maxLength: 3 })
+).map(([col, table, vals]) => ({
+  select: ["*"],
+  from: table,
+  where: ["@>", col, ["array", ...vals]],
+} as SqlClause));
+
+// CASE with regex operators
+const caseWithRegex: fc.Arbitrary<SqlClause> = fc.tuple(
+  columnIdent,
+  tableIdent,
+  regexPattern,
+  regexPattern,
+  fc.stringMatching(/^[a-z]{1,8}$/)
+).map(([col, table, pattern1, pattern2, defaultVal]) => ({
+  select: [
+    [
+      ["case",
+        ["~*", col, { $: pattern1 }], { $: "match1" },
+        ["~*", col, { $: pattern2 }], { $: "match2" },
+        "else", { $: defaultVal }
+      ],
+      "result"
+    ]
+  ],
+  from: table,
+} as SqlClause));
+
+// Full-text search with @@
+const selectTextSearch: fc.Arbitrary<SqlClause> = fc.tuple(
+  columnIdent,
+  tableIdent,
+  fc.stringMatching(/^[a-z]+( & [a-z]+)?$/)
+).map(([col, table, query]) => ({
+  select: ["*"],
+  from: table,
+  where: ["@@", col, ["%to_tsquery", { $: query }]],
+} as SqlClause));
+
+// ============================================================================
 // Round-trip Test
 // ============================================================================
 
@@ -807,6 +982,126 @@ describe("stress test", () => {
         roundTripTest(clause);
       }),
       { numRuns: 2000 }
+    );
+  });
+});
+
+// ============================================================================
+// Quoted Identifiers Tests
+// ============================================================================
+
+describe("quoted identifiers with spaces", () => {
+  it("SELECT with quoted column names", () => {
+    fc.assert(
+      fc.property(selectWithQuotedIdents, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("mixed normal and quoted columns", () => {
+    fc.assert(
+      fc.property(selectMixedColumns, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("WHERE with quoted identifiers", () => {
+    fc.assert(
+      fc.property(selectQuotedWhere, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
+    );
+  });
+});
+
+// ============================================================================
+// PostgreSQL Operators Tests
+// ============================================================================
+
+describe("PostgreSQL operators", () => {
+  it("case-insensitive regex (~*)", () => {
+    fc.assert(
+      fc.property(selectRegexOp, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("case-sensitive regex (~)", () => {
+    fc.assert(
+      fc.property(selectCaseSensitiveRegex, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("JSON get (->)", () => {
+    fc.assert(
+      fc.property(selectJsonGet, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("JSON get text (->>)", () => {
+    fc.assert(
+      fc.property(selectJsonGetText, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("JSONB contains (@>)", () => {
+    fc.assert(
+      fc.property(selectJsonContains, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("array overlap (&&)", () => {
+    fc.assert(
+      fc.property(selectArrayOverlap, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("array contains (@>)", () => {
+    fc.assert(
+      fc.property(selectArrayContains, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("CASE with regex operators", () => {
+    fc.assert(
+      fc.property(caseWithRegex, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("full-text search (@@)", () => {
+    fc.assert(
+      fc.property(selectTextSearch, (clause) => {
+        roundTripTest(clause);
+      }),
+      { numRuns: 100 }
     );
   });
 });

@@ -208,9 +208,11 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
 
     case "member": {
       const mem = expr as ExprMember;
+      const memAny = mem as unknown as { op: string };
       const obj = exprToClause(mem.operand);
-      const prop = mem.member;
-      return ["->", obj, prop];
+      // member is a string literal, wrap as typed value
+      const prop = { $: mem.member };
+      return [memAny.op, obj, prop];
     }
 
     case "arrayIndex": {
