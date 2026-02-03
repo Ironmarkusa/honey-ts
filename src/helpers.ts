@@ -7,6 +7,138 @@
 import type { SqlClause, SqlExpr } from "./types.js";
 
 // ============================================================================
+// Table Aliases
+// ============================================================================
+
+/**
+ * Represents a scope of table aliases in a query tree.
+ * SQL aliases are scoped to their query block - subqueries have their own scope.
+ */
+export interface AliasScope {
+  /** Table name → alias mapping for this scope */
+  aliases: Map<string, string>;
+  /** Human-readable location: "root", "with:cte_name", "where", "from[0]", etc. */
+  location: string;
+  /** Nested scopes (subqueries, CTEs, UNIONs) */
+  children: AliasScope[];
+}
+
+/**
+ * Get table aliases from a query as a tree of scopes.
+ *
+ * - `tree.aliases` - top-level table name → alias map
+ * - `tree.children` - nested scopes (subqueries, CTEs, UNIONs)
+ *
+ * @example
+ * ```ts
+ * const tree = getTableAliases(clause);
+ * tree.aliases        // Map { "users" => "u", "orders" => "o" }
+ * tree.children       // nested subquery scopes
+ * tree.children[0].location  // "where", "from[0]", "with:cte_name", etc.
+ * ```
+ */
+export function getTableAliases(clause: SqlClause, location = "root"): AliasScope {
+  const scope: AliasScope = {
+    aliases: extractTableToAliasMap(clause),
+    location,
+    children: [],
+  };
+
+  // WITH / WITH RECURSIVE - each CTE is a scope
+  for (const key of ["with", "with-recursive"] as const) {
+    const ctes = clause[key] as [string, SqlClause][] | undefined;
+    if (ctes) {
+      for (const [name, cte] of ctes) {
+        scope.children.push(getTableAliases(cte, `${key}:${name}`));
+      }
+    }
+  }
+
+  // UNION / INTERSECT / EXCEPT - each branch is a scope
+  for (const key of ["union", "union-all", "intersect", "except", "except-all"] as const) {
+    const branches = clause[key] as SqlClause[] | undefined;
+    if (branches) {
+      branches.forEach((branch, i) => {
+        scope.children.push(getTableAliases(branch, `${key}[${i}]`));
+      });
+    }
+  }
+
+  // FROM - may contain subqueries
+  if (clause.from) {
+    collectSubqueryScopes(clause.from as SqlExpr, "from", scope.children);
+  }
+
+  // WHERE - may contain subqueries
+  if (clause.where) {
+    collectSubqueryScopes(clause.where as SqlExpr, "where", scope.children);
+  }
+
+  // SELECT - may contain scalar subqueries
+  if (clause.select) {
+    collectSubqueryScopes(clause.select as SqlExpr, "select", scope.children);
+  }
+
+  // HAVING - may contain subqueries
+  if (clause.having) {
+    collectSubqueryScopes(clause.having as SqlExpr, "having", scope.children);
+  }
+
+  return scope;
+}
+
+/**
+ * Recursively find subqueries in an expression and add their scopes.
+ */
+function collectSubqueryScopes(
+  expr: SqlExpr,
+  basePath: string,
+  children: AliasScope[],
+  index = { n: 0 }
+): void {
+  if (isClauseMap(expr)) {
+    const location = index.n === 0 ? basePath : `${basePath}[${index.n}]`;
+    index.n++;
+    children.push(getTableAliases(expr, location));
+    return;
+  }
+
+  if (Array.isArray(expr)) {
+    for (const item of expr) {
+      collectSubqueryScopes(item as SqlExpr, basePath, children, index);
+    }
+  }
+}
+
+/**
+ * Extract table name → alias mapping from FROM and JOIN clauses.
+ * (Internal helper)
+ */
+function extractTableToAliasMap(clause: SqlClause): Map<string, string> {
+  const tableToAlias = new Map<string, string>();
+
+  // Process FROM clause
+  if (clause.from) {
+    const fromItems = Array.isArray(clause.from) ? clause.from : [clause.from];
+    for (const item of fromItems) {
+      extractTableToAlias(item as SqlExpr, tableToAlias);
+    }
+  }
+
+  // Process all JOIN types
+  for (const joinType of ["join", "left-join", "right-join", "inner-join", "outer-join", "full-join"] as const) {
+    const joins = clause[joinType] as [SqlExpr, SqlExpr][] | undefined;
+    if (joins) {
+      for (const [tableExpr] of joins) {
+        extractTableToAlias(tableExpr, tableToAlias);
+      }
+    }
+  }
+
+  return tableToAlias;
+}
+
+// ============================================================================
 // Internal Helpers
 // ============================================================================
 
@@ -122,41 +254,6 @@ export function injectWhere(clause: SqlClause, condition: SqlExpr): SqlClause {
 // ============================================================================
 // Select Manipulation
 // ============================================================================
-
-/**
- * Extract table name → alias mapping from FROM and JOIN clauses.
- * Returns the alias used for each table in the query.
- *
- * @example
- * ```ts
- * const clause = fromSql("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id");
- * const tables = getTableAliases(clause);
- * // Map { "users" => "u", "orders" => "o" }
- * ```
- */
-export function getTableAliases(clause: SqlClause): Map<string, string> {
-  const tableToAlias = new Map<string, string>();
-
-  // Process FROM clause
-  if (clause.from) {
-    const fromItems = Array.isArray(clause.from) ? clause.from : [clause.from];
-    for (const item of fromItems) {
-      extractTableToAlias(item as SqlExpr, tableToAlias);
-    }
-  }
-
-  // Process all JOIN types
-  for (const joinType of ["join", "left-join", "right-join", "inner-join", "outer-join", "full-join"] as const) {
-    const joins = clause[joinType] as [SqlExpr, SqlExpr][] | undefined;
-    if (joins) {
-      for (const [tableExpr] of joins) {
-        extractTableToAlias(tableExpr, tableToAlias);
-      }
-    }
-  }
-
-  return tableToAlias;
-}
 
 /**
  * Extract table → alias from a single FROM/JOIN item.

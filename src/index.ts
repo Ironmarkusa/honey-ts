@@ -55,6 +55,8 @@ export {
   getTableAliases,
 } from "./helpers.js";
 
+export type { AliasScope } from "./helpers.js";
+
 // Types
 export type {
   SqlExpr,
