@@ -204,6 +204,59 @@ describe("round-trip edge cases", () => {
   }
 });
 
+describe("quoted identifiers with spaces", () => {
+  it("parses and formats column names with spaces", () => {
+    const sql = `SELECT s."Store Name" as location FROM staging.imports s`;
+    const clause = fromSql(sql);
+
+    // Should parse the qualified identifier
+    assert.deepStrictEqual(clause.select, [["s.Store Name", "location"]]);
+
+    // Should round-trip correctly
+    const [out] = toSql(clause, { quoted: true });
+    assert.match(out, /"s"\."Store Name"/);
+    assert.match(out, /AS "location"/);
+  });
+
+  it("handles multiple quoted columns with spaces", () => {
+    const sql = `SELECT s."Email", s."First Name", s."Last Name" FROM staging.data s`;
+    const clause = fromSql(sql);
+    const [out] = toSql(clause, { quoted: true });
+
+    assert.match(out, /"s"\."Email"/);
+    assert.match(out, /"s"\."First Name"/);
+    assert.match(out, /"s"\."Last Name"/);
+  });
+
+  it("handles schema-qualified tables", () => {
+    const sql = `SELECT * FROM staging.import_abc123`;
+    const clause = fromSql(sql);
+    const [out] = toSql(clause, { quoted: true });
+
+    assert.match(out, /"staging"\."import_abc123"/);
+  });
+
+  it("handles aliased schema-qualified tables", () => {
+    const sql = `SELECT s.id FROM staging.imports s`;
+    const clause = fromSql(sql);
+
+    assert.deepStrictEqual(clause.from, [["staging.imports", "s"]]);
+
+    const [out] = toSql(clause, { quoted: true });
+    assert.match(out, /"staging"\."imports" AS "s"/);
+  });
+
+  it("round-trips CSV-style column names", () => {
+    const sql = `SELECT s."Email" as email, s."Signup Date" as captured_at FROM staging.csv_data s WHERE s."Status" = 'active'`;
+    const clause = fromSql(sql);
+    const [out] = toSql(clause, { quoted: true, inline: true });
+
+    assert.match(out, /"s"\."Email" AS "email"/);
+    assert.match(out, /"s"\."Signup Date" AS "captured_at"/);
+    assert.match(out, /"s"\."Status" = 'active'/);
+  });
+});
+
 describe("normalizeSql", () => {
   it("normalizes whitespace", () => {
     const sql1 = "SELECT   id,  name   FROM   users";
