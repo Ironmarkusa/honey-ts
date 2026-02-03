@@ -633,7 +633,18 @@ function analyzeSelectItem(
 
 /**
  * Get all column references from an expression.
- * Returns just the column names (without table prefix).
+ * Returns resolved table.column names when tableAliasMap is provided.
+ *
+ * @example
+ * ```ts
+ * // Without alias map - returns just column names
+ * getReferencedColumns(["||", "t.first", "t.last"])
+ * // => ["first", "last"]
+ *
+ * // With alias map - returns resolved table.column
+ * getReferencedColumns(["||", "t.first", "t.last"], aliasMap)
+ * // => ["users.first", "users.last"]  (if t -> users)
+ * ```
  */
 export function getReferencedColumns(
   expr: SqlExpr,
@@ -650,10 +661,21 @@ export function getReferencedColumns(
       if (e === "else") return;
       if (["and", "or", "not", "is", "in", "like", "between"].includes(e.toLowerCase())) return;
 
-      // Extract column name
-      const colName = e.includes(".") ? e.split(".").pop()! : e;
-      if (colName && !cols.includes(colName)) {
-        cols.push(colName);
+      let resolved: string;
+      if (e.includes(".")) {
+        // Qualified: "t.email" -> resolve alias
+        const dotIdx = e.indexOf(".");
+        const tableAlias = e.substring(0, dotIdx);
+        const colName = e.substring(dotIdx + 1);
+        const tableName = tableAliasMap?.get(tableAlias) ?? tableAlias;
+        resolved = `${tableName}.${colName}`;
+      } else {
+        // Unqualified: just column name
+        resolved = e;
+      }
+
+      if (resolved && !cols.includes(resolved)) {
+        cols.push(resolved);
       }
       return;
     }

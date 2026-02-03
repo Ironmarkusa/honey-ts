@@ -441,13 +441,13 @@ describe("analyzeSelects", () => {
     assert.strictEqual(analysis.items[0]!.isPassthrough, false);
   });
 
-  it("handles qualified column names", () => {
+  it("handles qualified column names with resolved table", () => {
     const clause = fromSql("SELECT u.email AS email_hash FROM users u");
     const analysis = analyzeSelects(clause);
 
     assert.strictEqual(analysis.items[0]!.alias, "email_hash");
     assert.strictEqual(analysis.items[0]!.isPassthrough, true);
-    assert.deepStrictEqual(analysis.items[0]!.sources, ["email"]);
+    assert.deepStrictEqual(analysis.items[0]!.sources, ["users.email"]);
   });
 
   it("handles subqueries in children", () => {
@@ -501,9 +501,15 @@ describe("getReferencedColumns", () => {
     assert.deepStrictEqual(cols, ["email"]);
   });
 
-  it("extracts column from qualified reference", () => {
+  it("extracts qualified column reference", () => {
     const cols = getReferencedColumns("u.email");
-    assert.deepStrictEqual(cols, ["email"]);
+    assert.deepStrictEqual(cols, ["u.email"]);
+  });
+
+  it("resolves table alias when map provided", () => {
+    const aliasMap = new Map([["u", "users"]]);
+    const cols = getReferencedColumns("u.email", aliasMap);
+    assert.deepStrictEqual(cols, ["users.email"]);
   });
 
   it("extracts columns from CASE expression", () => {
