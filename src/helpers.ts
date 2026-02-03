@@ -284,7 +284,7 @@ export function overrideSelects(
       const onExprs = arr[0];
       const selectExprs = arr.slice(1);
       const transformed = transformSelectItems(selectExprs, overrides, aliasMap);
-      result[key] = [onExprs, ...transformed];
+      (result as Record<string, unknown>)[key] = [onExprs, ...transformed];
     } else {
       // Regular select or select-distinct
       const items = Array.isArray(selectValue) ? selectValue : [selectValue];

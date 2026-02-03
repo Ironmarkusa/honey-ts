@@ -93,7 +93,7 @@ describe("overrideSelects", () => {
     const clause: SqlClause = {
       select: ["u.email", "t.email"],
       from: [["users", "u"]],
-      join: [[[["temp", "t"], ["=", "u.id", "t.user_id"]]]],
+      join: [[["temp", "t"], ["=", "u.id", "t.user_id"]]],
     };
 
     // Only override users.email, not temp.email
@@ -111,7 +111,7 @@ describe("overrideSelects", () => {
     const clause: SqlClause = {
       select: ["u.email", "t.email"],
       from: [["users", "u"]],
-      join: [[[["temp", "t"], ["=", "u.id", "t.user_id"]]]],
+      join: [[["temp", "t"], ["=", "u.id", "t.user_id"]]],
     };
 
     const result = overrideSelects(clause, {
