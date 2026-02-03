@@ -52,6 +52,7 @@ export {
   walkClauses,
   injectWhere,
   overrideSelects,
+  getTableAliases,
 } from "./helpers.js";
 
 // Types

@@ -124,7 +124,63 @@ export function injectWhere(clause: SqlClause, condition: SqlExpr): SqlClause {
 // ============================================================================
 
 /**
+ * Extract table name → alias mapping from FROM and JOIN clauses.
+ * Returns the alias used for each table in the query.
+ *
+ * @example
+ * ```ts
+ * const clause = fromSql("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id");
+ * const tables = getTableAliases(clause);
+ * // Map { "users" => "u", "orders" => "o" }
+ * ```
+ */
+export function getTableAliases(clause: SqlClause): Map<string, string> {
+  const tableToAlias = new Map<string, string>();
+
+  // Process FROM clause
+  if (clause.from) {
+    const fromItems = Array.isArray(clause.from) ? clause.from : [clause.from];
+    for (const item of fromItems) {
+      extractTableToAlias(item as SqlExpr, tableToAlias);
+    }
+  }
+
+  // Process all JOIN types
+  for (const joinType of ["join", "left-join", "right-join", "inner-join", "outer-join", "full-join"] as const) {
+    const joins = clause[joinType] as [SqlExpr, SqlExpr][] | undefined;
+    if (joins) {
+      for (const [tableExpr] of joins) {
+        extractTableToAlias(tableExpr, tableToAlias);
+      }
+    }
+  }
+
+  return tableToAlias;
+}
+
+/**
+ * Extract table → alias from a single FROM/JOIN item.
+ */
+function extractTableToAlias(item: SqlExpr, tableToAlias: Map<string, string>): void {
+  // Bare table name: "users" -> users maps to users
+  if (typeof item === "string") {
+    tableToAlias.set(item, item);
+    return;
+  }
+
+  // [table, alias] form: ["users", "u"] -> users maps to u
+  if (Array.isArray(item) && item.length === 2) {
+    const [first, second] = item;
+    if (typeof first === "string" && typeof second === "string") {
+      tableToAlias.set(first, second);
+      return;
+    }
+  }
+}
+
+/**
  * Extract alias → table name mapping from FROM and JOIN clauses.
+ * (Internal helper for overrideSelects)
  */
 function extractTableAliases(clause: SqlClause): Map<string, string> {
   const aliases = new Map<string, string>();
