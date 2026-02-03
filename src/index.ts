@@ -60,6 +60,19 @@ export {
 
 export type { AliasScope, SelectItemAnalysis, SelectAnalysisScope } from "./helpers.js";
 
+// Schema-aware query builder
+export { createQueryBuilder } from "./builder.js";
+
+export type {
+  ColumnSchema,
+  TableSchema,
+  DatabaseSchema,
+  QueryBuilder,
+  OperatorInfo,
+  FunctionInfo,
+  ValidationResult,
+} from "./builder.js";
+
 // SQL guard (LLM validation)
 export {
   guardSql,
