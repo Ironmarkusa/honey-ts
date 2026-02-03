@@ -56,7 +56,7 @@ describe("overrideSelects", () => {
     ]);
   });
 
-  it("handles qualified column names", () => {
+  it("handles qualified column names with unqualified override", () => {
     const clause: SqlClause = {
       select: ["u.id", "u.email"],
       from: [["users", "u"]],
@@ -69,6 +69,75 @@ describe("overrideSelects", () => {
     assert.deepStrictEqual(result.select, [
       "u.id",
       [["%sha256", "u.email"], "email"],
+    ]);
+  });
+
+  it("resolves table alias to actual table name", () => {
+    const clause: SqlClause = {
+      select: ["u.id", "u.email"],
+      from: [["users", "u"]],
+    };
+
+    // Override using actual table name, not the alias
+    const result = overrideSelects(clause, {
+      "users.email": ["%sha256", "u.email"],
+    });
+
+    assert.deepStrictEqual(result.select, [
+      "u.id",
+      [["%sha256", "u.email"], "email"],
+    ]);
+  });
+
+  it("matches specific table when multiple tables have same column", () => {
+    const clause: SqlClause = {
+      select: ["u.email", "t.email"],
+      from: [["users", "u"]],
+      join: [[[["temp", "t"], ["=", "u.id", "t.user_id"]]]],
+    };
+
+    // Only override users.email, not temp.email
+    const result = overrideSelects(clause, {
+      "users.email": ["%sha256", "u.email"],
+    });
+
+    assert.deepStrictEqual(result.select, [
+      [["%sha256", "u.email"], "email"],  // matched users.email
+      "t.email",  // unchanged (temp.email didn't match)
+    ]);
+  });
+
+  it("table.column takes precedence over bare column", () => {
+    const clause: SqlClause = {
+      select: ["u.email", "t.email"],
+      from: [["users", "u"]],
+      join: [[[["temp", "t"], ["=", "u.id", "t.user_id"]]]],
+    };
+
+    const result = overrideSelects(clause, {
+      "users.email": ["%sha256", "u.email"],  // specific to users
+      "email": ["%lower", "email"],            // fallback for others
+    });
+
+    assert.deepStrictEqual(result.select, [
+      [["%sha256", "u.email"], "email"],  // matched users.email
+      [["%lower", "email"], "email"],     // matched email fallback (temp.email)
+    ]);
+  });
+
+  it("works with bare table names (no alias)", () => {
+    const clause: SqlClause = {
+      select: ["users.id", "users.email"],
+      from: "users",
+    };
+
+    const result = overrideSelects(clause, {
+      "users.email": ["%sha256", "users.email"],
+    });
+
+    assert.deepStrictEqual(result.select, [
+      "users.id",
+      [["%sha256", "users.email"], "email"],
     ]);
   });
 
