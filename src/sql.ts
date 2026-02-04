@@ -16,6 +16,7 @@ import type {
   DialectConfig,
 } from "./types.js";
 import { isIdent, isParam, isRaw, isLift, isClause, isExprArray, isTypedValue } from "./types.js";
+import { format as sqlFormat } from "sql-formatter";
 
 // ============================================================================
 // String Utilities (ported from honey.sql.util)
@@ -1439,12 +1440,7 @@ export function formatDsl(
     throw new Error(`Unknown SQL clauses: ${unknown.join(", ")}`);
   }
 
-  const separator = ctx.options.pretty ? "\n" : " ";
-  let sql = sqls.filter(Boolean).join(separator);
-
-  if (ctx.options.pretty) {
-    sql = "\n" + sql + "\n";
-  }
+  let sql = sqls.filter(Boolean).join(" ");
 
   if (opts.nested && !opts.aliased) {
     sql = `(${sql})`;
@@ -1473,11 +1469,23 @@ export function formatDsl(
 export function format(data: SqlClause | SqlExpr, opts: FormatOptions = {}): FormatResult {
   const ctx = createContext(opts);
 
+  let result: FormatResult;
   if (isClause(data) && !isExprArray(data)) {
-    return formatDsl(data, ctx);
+    result = formatDsl(data, ctx);
+  } else {
+    result = formatExpr(data as SqlExpr, ctx);
   }
 
-  return formatExpr(data as SqlExpr, ctx);
+  // Apply sql-formatter for pretty printing
+  if (opts.pretty && result[0]) {
+    result[0] = sqlFormat(result[0], {
+      language: "postgresql",
+      tabWidth: 2,
+      keywordCase: "upper",
+    });
+  }
+
+  return result;
 }
 
 // ============================================================================
