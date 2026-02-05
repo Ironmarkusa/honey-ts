@@ -111,6 +111,108 @@ describe("format", () => {
       });
       assert.match(sql, /RETURNING "id", "created_at"/);
     });
+
+    it("formats INSERT with column list", () => {
+      const [sql, ...params] = format({
+        "insert-into": ["users", ["name", "email"]],
+        values: [[{$: "Alice"}, {$: "alice@example.com"}]],
+      });
+      assert.match(sql, /INSERT INTO "users" \("name", "email"\)/);
+      assert.match(sql, /VALUES \(\$1, \$2\)/);
+    });
+
+    it("formats INSERT...SELECT with correct clause order", () => {
+      const [sql, ...params] = format({
+        "insert-into": ["target_table", ["id", "name", "value"]],
+        select: ["s.id", "s.name", ["%upper", "s.value"]],
+        from: [["source_table", "s"]],
+        where: ["=", "s.active", {$: true}],
+      });
+      // INSERT INTO must come before SELECT
+      const insertPos = sql.indexOf("INSERT INTO");
+      const selectPos = sql.indexOf("SELECT");
+      assert.ok(insertPos < selectPos, "INSERT INTO should come before SELECT");
+      assert.match(sql, /INSERT INTO "target_table" \("id", "name", "value"\) SELECT/);
+    });
+
+    it("formats INSERT...SELECT with JOIN", () => {
+      const [sql] = format({
+        "insert-into": ["audit_log", ["user_id", "action", "timestamp"]],
+        select: ["u.id", {$: "login"}, ["%now"]],
+        from: [["users", "u"]],
+        join: [[["sessions", "s"], ["=", "s.user_id", "u.id"]]],
+        where: ["=", "u.active", {$: true}],
+      });
+      assert.match(sql, /INSERT INTO "audit_log"/);
+      assert.match(sql, /SELECT "u"."id"/);
+      assert.match(sql, /FROM "users" AS "u"/);
+      assert.match(sql, /JOIN "sessions" AS "s"/);
+    });
+
+    it("formats INSERT...SELECT without column list", () => {
+      const [sql] = format({
+        "insert-into": "target_table",
+        select: ["*"],
+        from: "source_table",
+      });
+      assert.match(sql, /INSERT INTO "target_table" SELECT \* FROM "source_table"/);
+    });
+  });
+
+  describe("clause ordering", () => {
+    it("orders WITH before INSERT", () => {
+      const [sql] = format({
+        with: [["temp", { select: ["*"], from: "users" }]],
+        "insert-into": ["target", ["id"]],
+        select: ["id"],
+        from: "temp",
+      });
+      const withPos = sql.indexOf("WITH");
+      const insertPos = sql.indexOf("INSERT INTO");
+      assert.ok(withPos < insertPos, "WITH should come before INSERT INTO");
+    });
+
+    it("orders INSERT before SELECT before FROM", () => {
+      const [sql] = format({
+        from: "source",
+        select: ["*"],
+        "insert-into": "target",
+      });
+      const insertPos = sql.indexOf("INSERT INTO");
+      const selectPos = sql.indexOf("SELECT");
+      const fromPos = sql.indexOf("FROM");
+      assert.ok(insertPos < selectPos, "INSERT INTO should come before SELECT");
+      assert.ok(selectPos < fromPos, "SELECT should come before FROM");
+    });
+
+    it("orders UPDATE before SET before FROM before WHERE", () => {
+      const [sql] = format({
+        where: ["=", "u.id", "t.id"],
+        from: [["temp", "t"]],
+        set: { name: "t.name" },
+        update: [["users", "u"]],
+      }, { checking: "none" });
+      const updatePos = sql.indexOf("UPDATE");
+      const setPos = sql.indexOf("SET");
+      const fromPos = sql.indexOf("FROM");
+      const wherePos = sql.indexOf("WHERE");
+      assert.ok(updatePos < setPos, "UPDATE should come before SET");
+      assert.ok(setPos < fromPos, "SET should come before FROM");
+      assert.ok(fromPos < wherePos, "FROM should come before WHERE");
+    });
+
+    it("orders DELETE before FROM before WHERE", () => {
+      const [sql] = format({
+        where: ["=", "id", {$: 1}],
+        from: "users",
+        delete: true,
+      }, { checking: "none" });
+      const deletePos = sql.indexOf("DELETE");
+      const fromPos = sql.indexOf("FROM");
+      const wherePos = sql.indexOf("WHERE");
+      assert.ok(deletePos < fromPos, "DELETE should come before FROM");
+      assert.ok(fromPos < wherePos, "FROM should come before WHERE");
+    });
   });
 
   describe("UPDATE queries", () => {
