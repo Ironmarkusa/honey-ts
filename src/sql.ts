@@ -740,6 +740,24 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
     return [`NOT ${sql}`, ...p];
   }],
 
+  // IS TRUE / IS NOT TRUE / IS FALSE / IS NOT FALSE
+  ["is true", (k, [x], ctx) => {
+    const [sql, ...p] = formatExpr(x!, ctx, { nested: true });
+    return [`${sql} IS TRUE`, ...p];
+  }],
+  ["is not true", (k, [x], ctx) => {
+    const [sql, ...p] = formatExpr(x!, ctx, { nested: true });
+    return [`${sql} IS NOT TRUE`, ...p];
+  }],
+  ["is false", (k, [x], ctx) => {
+    const [sql, ...p] = formatExpr(x!, ctx, { nested: true });
+    return [`${sql} IS FALSE`, ...p];
+  }],
+  ["is not false", (k, [x], ctx) => {
+    const [sql, ...p] = formatExpr(x!, ctx, { nested: true });
+    return [`${sql} IS NOT FALSE`, ...p];
+  }],
+
   // DISTINCT (in SELECT context)
   ["distinct", (k, [x], ctx) => {
     const [sql, ...p] = formatExpr(x!, ctx, { nested: true });
