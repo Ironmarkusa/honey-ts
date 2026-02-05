@@ -358,15 +358,9 @@ export function formatExpr(expr: SqlExpr, ctx: FormatContext, opts: { nested?: b
     return [`(${sqls.join(", ")})`, ...params];
   }
 
-  // Boolean
+  // Boolean — always inline as SQL keyword, like NULL
   if (typeof expr === "boolean") {
-    if (options.inline) {
-      return [expr ? "TRUE" : "FALSE"];
-    }
-    if (options.numbered) {
-      return addNumberedParam(expr, ctx);
-    }
-    return ["?", expr];
+    return [expr ? "TRUE" : "FALSE"];
   }
 
   // Null
@@ -400,6 +394,11 @@ export function formatExpr(expr: SqlExpr, ctx: FormatContext, opts: { nested?: b
     const keys = Object.keys(expr);
     const type = keys[0]!;
     let value = (expr as Record<string, unknown>)[type];
+
+    // Booleans are SQL keywords, always inline (like NULL)
+    if (type === "$" && typeof value === "boolean") {
+      return [value ? "TRUE" : "FALSE"];
+    }
 
     // Auto-stringify objects for jsonb
     if (type === "jsonb" && typeof value === "object" && value !== null) {
@@ -738,24 +737,6 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
   ["not", (k, [x], ctx) => {
     const [sql, ...p] = formatExpr(x!, ctx, { nested: true });
     return [`NOT ${sql}`, ...p];
-  }],
-
-  // IS TRUE / IS NOT TRUE / IS FALSE / IS NOT FALSE
-  ["is true", (k, [x], ctx) => {
-    const [sql, ...p] = formatExpr(x!, ctx, { nested: true });
-    return [`${sql} IS TRUE`, ...p];
-  }],
-  ["is not true", (k, [x], ctx) => {
-    const [sql, ...p] = formatExpr(x!, ctx, { nested: true });
-    return [`${sql} IS NOT TRUE`, ...p];
-  }],
-  ["is false", (k, [x], ctx) => {
-    const [sql, ...p] = formatExpr(x!, ctx, { nested: true });
-    return [`${sql} IS FALSE`, ...p];
-  }],
-  ["is not false", (k, [x], ctx) => {
-    const [sql, ...p] = formatExpr(x!, ctx, { nested: true });
-    return [`${sql} IS NOT FALSE`, ...p];
   }],
 
   // DISTINCT (in SELECT context)

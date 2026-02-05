@@ -124,6 +124,10 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
       if (op === "is not null") return ["is-not", operand, null];
       if (op === "isnull") return ["is", operand, null];
       if (op === "notnull") return ["is-not", operand, null];
+      if (op === "is true") return ["is", operand, true];
+      if (op === "is not true") return ["is-not", operand, true];
+      if (op === "is false") return ["is", operand, false];
+      if (op === "is not false") return ["is-not", operand, false];
       return [op, operand];
     }
 
