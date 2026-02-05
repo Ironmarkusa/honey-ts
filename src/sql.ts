@@ -80,10 +80,11 @@ const defaultClauseOrder: string[] = [
   "create-index",
   // SQL clauses in priority order
   "raw", "nest", "with", "with-recursive", "intersect", "union", "union-all", "except", "except-all",
+  // DML statements must come before SELECT for INSERT...SELECT, UPDATE...FROM, etc.
+  "insert-into", "replace-into", "update", "delete", "delete-from", "truncate",
   "select", "select-distinct", "select-distinct-on", "select-top", "select-distinct-top",
   "distinct", "expr", "exclude", "rename",
   "into", "bulk-collect-into",
-  "insert-into", "replace-into", "update", "delete", "delete-from", "truncate",
   "columns", "set", "from", "using",
   "join-by",
   "join", "left-join", "right-join", "inner-join", "outer-join", "full-join",
@@ -980,12 +981,18 @@ clauseFormatters.set("insert-into", (k, x, ctx) => {
   const items = Array.isArray(x) ? x : [x];
   const table = items[0];
 
-  // Check for subquery or table with columns
-  if (items.length === 2 && isClause(items[1])) {
-    // INSERT INTO table (subquery)
+  // Check for subquery: INSERT INTO table (subquery)
+  if (items.length === 2 && isClause(items[1]) && !Array.isArray(items[1])) {
     const [tableSql] = formatExpr(table as SqlExpr, ctx);
     const [subSql, ...p] = formatDsl(items[1] as SqlClause, ctx);
     return [`INSERT INTO ${tableSql} ${subSql}`, ...p];
+  }
+
+  // Check for column list: INSERT INTO table (col1, col2, ...)
+  if (items.length === 2 && Array.isArray(items[1])) {
+    const [tableSql] = formatExpr(table as SqlExpr, ctx);
+    const columns = (items[1] as string[]).map((col) => formatEntity(col, ctx)).join(", ");
+    return [`INSERT INTO ${tableSql} (${columns})`];
   }
 
   const [sql] = formatExpr(table as SqlExpr, ctx);
