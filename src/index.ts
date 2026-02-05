@@ -128,5 +128,14 @@ export {
   FormatOptionsSchema,
 } from "./types.js";
 
-// PostgreSQL operators (import separately to register)
-// import 'honey-ts/pg-ops' to register PG-specific operators
+// PostgreSQL operators (auto-registered)
+import "./pg-ops.js";
+
+// Re-export PG helper functions
+export {
+  jsonbContains,
+  jsonbPath,
+  arrayOverlaps,
+  regexMatch,
+  textSearch,
+} from "./pg-ops.js";
