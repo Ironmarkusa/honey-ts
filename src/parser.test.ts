@@ -21,7 +21,7 @@ describe("fromSql", () => {
 
     it("parses SELECT with WHERE", () => {
       const clause = fromSql("SELECT * FROM users WHERE id = 1");
-      assert.deepStrictEqual(clause.where, ["=", "id", { $: 1 }]);
+      assert.deepStrictEqual(clause.where, ["=", "id", { __literal: 1 }]);
     });
 
     it("parses SELECT with complex WHERE", () => {
@@ -41,8 +41,8 @@ describe("fromSql", () => {
 
     it("parses SELECT with LIMIT and OFFSET", () => {
       const clause = fromSql("SELECT * FROM users LIMIT 10 OFFSET 20");
-      assert.deepStrictEqual(clause.limit, { $: 10 });
-      assert.deepStrictEqual(clause.offset, { $: 20 });
+      assert.deepStrictEqual(clause.limit, { __literal: 10 });
+      assert.deepStrictEqual(clause.offset, { __literal: 20 });
     });
 
     it("parses SELECT with GROUP BY and HAVING", () => {

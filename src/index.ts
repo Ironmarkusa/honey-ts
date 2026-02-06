@@ -42,6 +42,7 @@ export {
   raw,
   param,
   lift,
+  literal,
 } from "./sql.js";
 
 // SQL parsing
@@ -91,6 +92,7 @@ export type {
   SqlParam,
   SqlRaw,
   SqlLift,
+  SqlLiteral,
   FormatResult,
   FormatOptions,
   DialectConfig,
@@ -113,6 +115,7 @@ export {
   isParam,
   isRaw,
   isLift,
+  isLiteral,
   isClause,
   isExprArray,
 } from "./types.js";
@@ -123,6 +126,7 @@ export {
   SqlParamSchema,
   SqlRawSchema,
   SqlLiftSchema,
+  SqlLiteralSchema,
   SqlExprSchema,
   SqlClauseSchema,
   FormatOptionsSchema,

@@ -513,3 +513,74 @@ describe("PostgreSQL infix operators", () => {
     assert.match(sql, /ELSE 'other' END AS "platform"/);
   });
 });
+
+describe("Literal values", () => {
+  it("inlines string literals in numbered param mode", () => {
+    const [sql, ...params] = format({
+      select: [["->", "data", { __literal: "name" }]],
+      from: "users",
+    });
+    assert.strictEqual(sql, `SELECT "data" -> 'name' FROM "users"`);
+    assert.deepStrictEqual(params, []);
+  });
+
+  it("inlines numeric literals in numbered param mode", () => {
+    const [sql, ...params] = format({
+      select: ["*"],
+      from: "users",
+      limit: { __literal: 10 },
+    });
+    assert.match(sql, /LIMIT 10/);
+    assert.deepStrictEqual(params, []);
+  });
+
+  it("inlines boolean literals", () => {
+    const [sql, ...params] = format({
+      select: ["*"],
+      from: "users",
+      where: ["=", "active", { __literal: true }],
+    });
+    assert.match(sql, /WHERE "active" = TRUE/);
+    assert.deepStrictEqual(params, []);
+  });
+
+  it("inlines null literals", () => {
+    const [sql, ...params] = format({
+      select: ["*"],
+      from: "users",
+      where: ["is", "deleted_at", { __literal: null }],
+    });
+    assert.match(sql, /WHERE "deleted_at" IS NULL/);
+    assert.deepStrictEqual(params, []);
+  });
+
+  it("inlines literals in positional param mode", () => {
+    const [sql, ...params] = format({
+      select: ["*"],
+      from: "users",
+      where: ["=", "name", { __literal: "Alice" }],
+    }, { numbered: false });
+    assert.strictEqual(sql, `SELECT * FROM "users" WHERE "name" = 'Alice'`);
+    assert.deepStrictEqual(params, []);
+  });
+
+  it("inlines literals in inline mode", () => {
+    const [sql, ...params] = format({
+      select: ["*"],
+      from: "users",
+      where: ["=", "id", { __literal: 42 }],
+    }, { inline: true });
+    assert.strictEqual(sql, 'SELECT * FROM "users" WHERE "id" = 42');
+    assert.deepStrictEqual(params, []);
+  });
+
+  it("mixes literals and parameterized values", () => {
+    const [sql, ...params] = format({
+      select: [["%jsonb_build_object", { __literal: "key" }, "col"]],
+      from: "users",
+      where: ["=", "name", { $: "Alice" }],
+    });
+    assert.strictEqual(sql, `SELECT JSONB_BUILD_OBJECT('key', "col") FROM "users" WHERE "name" = $1`);
+    assert.deepStrictEqual(params, ["Alice"]);
+  });
+});

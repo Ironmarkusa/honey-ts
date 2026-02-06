@@ -184,6 +184,9 @@ export function isTautology(where: SqlExpr): boolean {
   // {$: true}
   if (isTypedValue(where, true)) return true;
 
+  // {__literal: true}
+  if (isLiteralValue(where, true)) return true;
+
   // Check for equality tautologies: 1=1, 'a'='a', col=col
   if (Array.isArray(where) && where[0] === "=") {
     const [, left, right] = where;
@@ -195,6 +198,13 @@ export function isTautology(where: SqlExpr): boolean {
     if (isTypedValue(left) && isTypedValue(right)) {
       const leftVal = (left as { $: unknown }).$;
       const rightVal = (right as { $: unknown }).$;
+      if (leftVal === rightVal) return true;
+    }
+
+    // Same literal value: {__literal: 1} = {__literal: 1}
+    if (isLiteralValue(left) && isLiteralValue(right)) {
+      const leftVal = (left as { __literal: unknown }).__literal;
+      const rightVal = (right as { __literal: unknown }).__literal;
       if (leftVal === rightVal) return true;
     }
 
@@ -219,6 +229,13 @@ function isTypedValue(x: unknown, value?: unknown): boolean {
   return true;
 }
 
+function isLiteralValue(x: unknown, value?: unknown): boolean {
+  if (typeof x !== "object" || x === null || Array.isArray(x)) return false;
+  if (!("__literal" in x)) return false;
+  if (value !== undefined) return (x as { __literal: unknown }).__literal === value;
+  return true;
+}
+
 function checkLimit(clause: SqlClause, requireLimit?: boolean, maxRows?: number): string | null {
   const limit = clause.limit;
 
@@ -236,6 +253,9 @@ function checkLimit(clause: SqlClause, requireLimit?: boolean, maxRows?: number)
     limitValue = limit;
   } else if (isTypedValue(limit)) {
     const val = (limit as { $: unknown }).$;
+    if (typeof val === "number") limitValue = val;
+  } else if (isLiteralValue(limit)) {
+    const val = (limit as { __literal: unknown }).__literal;
     if (typeof val === "number") limitValue = val;
   }
 

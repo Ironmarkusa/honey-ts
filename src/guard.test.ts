@@ -317,8 +317,16 @@ describe("isTautology", () => {
     assert.strictEqual(isTautology({ $: true }), true);
   });
 
-  it("detects 1=1", () => {
+  it("detects {__literal: true}", () => {
+    assert.strictEqual(isTautology({ __literal: true }), true);
+  });
+
+  it("detects 1=1 with typed values", () => {
     assert.strictEqual(isTautology(["=", { $: 1 }, { $: 1 }]), true);
+  });
+
+  it("detects 1=1 with literal values", () => {
+    assert.strictEqual(isTautology(["=", { __literal: 1 }, { __literal: 1 }]), true);
   });
 
   it("detects col=col", () => {

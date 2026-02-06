@@ -28,6 +28,9 @@ export type SqlRaw = { __raw: string | (string | SqlExpr)[] };
 /** Lifted value (prevent DSL interpretation) */
 export type SqlLift = { __lift: unknown };
 
+/** Literal SQL constant (always inlined, never parameterized) */
+export type SqlLiteral = { __literal: unknown };
+
 /**
  * Typed value - becomes a parameterized value with optional cast
  * {$: "active"} → $1
@@ -50,6 +53,7 @@ export type SqlExpr =
   | SqlParam
   | SqlRaw
   | SqlLift
+  | SqlLiteral
   | Date
   | SqlExpr[]
   | SqlClause;
@@ -241,6 +245,8 @@ export const SqlRawSchema = z.object({
 
 export const SqlLiftSchema = z.object({ __lift: z.unknown() });
 
+export const SqlLiteralSchema = z.object({ __literal: z.unknown() });
+
 // Recursive schema for expressions
 export const SqlExprSchema: z.ZodType<SqlExpr> = z.lazy(() =>
   z.union([
@@ -253,6 +259,7 @@ export const SqlExprSchema: z.ZodType<SqlExpr> = z.lazy(() =>
     SqlParamSchema,
     SqlRawSchema,
     SqlLiftSchema,
+    SqlLiteralSchema,
     z.date(),
     z.array(SqlExprSchema),
     SqlClauseSchema,
@@ -333,6 +340,10 @@ export function isLift(x: unknown): x is SqlLift {
   return typeof x === "object" && x !== null && "__lift" in x;
 }
 
+export function isLiteral(x: unknown): x is SqlLiteral {
+  return typeof x === "object" && x !== null && "__literal" in x;
+}
+
 // SQL clause keys - these are NOT typed values
 const clauseKeys = new Set([
   "select", "select-distinct", "select-distinct-on",
@@ -367,6 +378,7 @@ export function isClause(x: unknown): x is SqlClause {
     !isParam(x) &&
     !isRaw(x) &&
     !isLift(x) &&
+    !isLiteral(x) &&
     !isTypedValue(x)
   );
 }

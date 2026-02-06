@@ -15,7 +15,7 @@ import type {
   FormatOptions,
   DialectConfig,
 } from "./types.js";
-import { isIdent, isParam, isRaw, isLift, isClause, isExprArray, isTypedValue } from "./types.js";
+import { isIdent, isParam, isRaw, isLift, isLiteral, isClause, isExprArray, isTypedValue } from "./types.js";
 import { format as sqlFormat } from "sql-formatter";
 
 // ============================================================================
@@ -403,6 +403,11 @@ export function formatExpr(expr: SqlExpr, ctx: FormatContext, opts: { nested?: b
     return ["?", expr.__lift];
   }
 
+  // Literal value (always inlined, never parameterized)
+  if (isLiteral(expr)) {
+    return [sqlizeValue(expr.__literal)];
+  }
+
   // Typed value: {$: value} or {type: value}
   if (isTypedValue(expr)) {
     const keys = Object.keys(expr);
@@ -425,9 +430,9 @@ export function formatExpr(expr: SqlExpr, ctx: FormatContext, opts: { nested?: b
     }
     if (options.numbered) {
       const [sql, ...params] = addNumberedParam(value, ctx);
-      return type === "$" ? [sql, ...params] : [`${sql}::${type}`, ...params];
+      return type !== "$" ? [`${sql}::${type}`, ...params] : [sql, ...params];
     }
-    return type === "$" ? ["?", value] : [`?::${type}`, value];
+    return type !== "$" ? [`?::${type}`, value] : ["?", value];
   }
 
   // Literal value (numbers, booleans - strings are now identifiers)
@@ -1571,6 +1576,13 @@ export function param(name: string): SqlExpr {
  */
 export function lift(value: unknown): SqlExpr {
   return { __lift: value };
+}
+
+/**
+ * Create a literal SQL constant (always inlined, never parameterized).
+ */
+export function literal(value: unknown): SqlExpr {
+  return { __literal: value };
 }
 
 /**

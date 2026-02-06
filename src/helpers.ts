@@ -298,6 +298,7 @@ function exprToString(expr: SqlExpr): string {
   }
   if (typeof expr === "object" && expr !== null) {
     if ("$" in expr) return String((expr as { $: unknown }).$);
+    if ("__literal" in expr) return String((expr as { __literal: unknown }).__literal);
     if ("__raw" in expr) return String((expr as { __raw: unknown }).__raw);
     // Subquery or clause object
     if (isClauseMap(expr)) return "(subquery)";
@@ -769,7 +770,7 @@ export function getReferencedColumns(
 
     // Handle typed values - they're not column references
     if (typeof e === "object" && e !== null) {
-      if ("$" in e || "__raw" in e || "__param" in e || "__lift" in e || "ident" in e) return;
+      if ("$" in e || "__literal" in e || "__raw" in e || "__param" in e || "__lift" in e || "ident" in e) return;
     }
   }
 
