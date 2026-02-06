@@ -8,11 +8,15 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./pg-ops": {
       "types": "./dist/pg-ops.d.ts",
-      "import": "./dist/pg-ops.js"
+      "import": "./dist/pg-ops.js",
+      "require": "./dist/pg-ops.js",
+      "default": "./dist/pg-ops.js"
     }
   },
   "files": [
