@@ -233,7 +233,16 @@ export function formatEntity(
   const { dialect, options } = ctx;
   const { quoted, quotedSnake, quotedAlways } = options;
 
-  const name = typeof e === "symbol" ? (e.description ?? "") : e;
+  // Handle {ident: [...]} qualified identifier format (preserves dots in names)
+  if (typeof e === "object" && e !== null && "ident" in e && Array.isArray((e as { ident: string[] }).ident)) {
+    const identParts = (e as { ident: string[] }).ident;
+    return identParts.map((part) => {
+      if (part === "*") return part;
+      return dialect.quote(quotedSnake ? nameUnderscore(part) : part);
+    }).join(".");
+  }
+
+  const name = typeof e === "symbol" ? (e.description ?? "") : e as string;
 
   // Handle quoted alias (starts with ')
   if (opts.aliased && name.startsWith("'")) {
@@ -319,6 +328,11 @@ export function formatExpr(expr: SqlExpr, ctx: FormatContext, opts: { nested?: b
   // Clause map -> format as nested DSL
   if (isClause(expr)) {
     return formatDsl(expr, ctx, { nested: true });
+  }
+
+  // Qualified identifier {ident: ["schema", "table", "column"]}
+  if (typeof expr === "object" && expr !== null && "ident" in expr && Array.isArray((expr as { ident: string[] }).ident)) {
+    return [formatEntity(expr as unknown as string, ctx)];
   }
 
   // Expression array

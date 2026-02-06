@@ -209,8 +209,8 @@ describe("quoted identifiers with spaces", () => {
     const sql = `SELECT s."Store Name" as location FROM staging.imports s`;
     const clause = fromSql(sql);
 
-    // Should parse the qualified identifier
-    assert.deepStrictEqual(clause.select, [["s.Store Name", "location"]]);
+    // Should parse the qualified identifier as {ident: [...]}
+    assert.deepStrictEqual(clause.select, [[{ ident: ["s", "Store Name"] }, "location"]]);
 
     // Should round-trip correctly
     const [out] = toSql(clause, { quoted: true });

@@ -7,6 +7,38 @@
 import type { SqlClause, SqlExpr } from "./types.js";
 
 // ============================================================================
+// Identifier Utilities
+// ============================================================================
+
+/**
+ * Check if a value is a qualified identifier {ident: [...]}
+ */
+function isQualifiedIdent(x: unknown): x is { ident: string[] } {
+  return typeof x === "object" && x !== null && "ident" in x && Array.isArray((x as { ident: unknown }).ident);
+}
+
+/**
+ * Convert an identifier to a dot-separated string for comparison/lookup.
+ * Handles both string format "a.b.c" and {ident: ["a", "b", "c"]} format.
+ */
+function identToString(x: unknown): string | null {
+  if (typeof x === "string") return x;
+  if (isQualifiedIdent(x)) return x.ident.join(".");
+  return null;
+}
+
+/**
+ * Get the parts of an identifier.
+ * "a.b.c" → ["a", "b", "c"]
+ * {ident: ["a", "b", "c"]} → ["a", "b", "c"]
+ */
+function identParts(x: unknown): string[] | null {
+  if (typeof x === "string") return x.split(".");
+  if (isQualifiedIdent(x)) return x.ident;
+  return null;
+}
+
+// ============================================================================
 // Table Aliases
 // ============================================================================
 
@@ -187,11 +219,12 @@ function extractColumnAlias(
   if (item === "*") return;
   if (typeof item === "string" && item.endsWith(".*")) return;
 
-  // Bare column: "id" or "u.id"
-  if (typeof item === "string") {
-    const resolved = resolveColumnName(item, tableAliasMap);
-    // For qualified names like "u.id", the output alias is just the column part
-    const outputAlias = item.includes(".") ? item.split(".").pop()! : item;
+  // Bare column: "id" or "u.id" or {ident: ["u", "id"]}
+  if (typeof item === "string" || isQualifiedIdent(item)) {
+    const resolved = resolveColumnIdent(item, tableAliasMap);
+    // For qualified names, the output alias is just the column part (last element)
+    const parts = identParts(item);
+    const outputAlias = parts && parts.length > 1 ? parts[parts.length - 1]! : (identToString(item) ?? "");
     columnToAlias.set(resolved, outputAlias);
     return;
   }
@@ -215,16 +248,19 @@ function extractColumnAlias(
 }
 
 /**
- * Resolve table alias in a column name to actual table name.
+ * Resolve table alias in a column identifier to actual table name.
  * "u.id" with u→users becomes "users.id"
+ * {ident: ["u", "id"]} with u→users becomes "users.id"
  */
-function resolveColumnName(col: string, tableAliasMap: Map<string, string>): string {
-  if (!col.includes(".")) return col;
-  const dotIdx = col.indexOf(".");
-  const tableAlias = col.substring(0, dotIdx);
-  const column = col.substring(dotIdx + 1);
+function resolveColumnIdent(col: string | { ident: string[] }, tableAliasMap: Map<string, string>): string {
+  const parts = identParts(col);
+  if (!parts || parts.length === 0) return identToString(col) ?? "";
+  if (parts.length === 1) return parts[0]!;
+
+  // First part might be a table alias
+  const tableAlias = parts[0]!;
   const tableName = tableAliasMap.get(tableAlias) ?? tableAlias;
-  return `${tableName}.${column}`;
+  return [tableName, ...parts.slice(1)].join(".");
 }
 
 /**
@@ -232,7 +268,10 @@ function resolveColumnName(col: string, tableAliasMap: Map<string, string>): str
  */
 function exprToStringResolved(expr: SqlExpr, tableAliasMap: Map<string, string>): string {
   if (typeof expr === "string") {
-    return resolveColumnName(expr, tableAliasMap);
+    return resolveColumnIdent(expr, tableAliasMap);
+  }
+  if (isQualifiedIdent(expr)) {
+    return resolveColumnIdent(expr, tableAliasMap);
   }
   // For non-string expressions, use regular exprToString
   return exprToString(expr);
@@ -246,6 +285,7 @@ function exprToString(expr: SqlExpr): string {
   if (typeof expr === "number") return String(expr);
   if (expr === null) return "NULL";
   if (typeof expr === "boolean") return String(expr).toUpperCase();
+  if (isQualifiedIdent(expr)) return expr.ident.join(".");
   if (Array.isArray(expr)) {
     // Function call like ["%count", "*"]
     if (typeof expr[0] === "string" && expr[0].startsWith("%")) {
@@ -590,12 +630,24 @@ function analyzeSelectItem(
   if (item === "*") return null;
   if (typeof item === "string" && item.endsWith(".*")) return null;
 
-  // Bare column: "id" or "u.id"
+  // Bare column: "id" or "u.id" or {ident: ["u", "id"]}
   if (typeof item === "string") {
     const columnName = item.includes(".") ? item.split(".").pop()! : item;
     return {
       alias: columnName,
-      sources: [columnName],
+      sources: [resolveColumnIdent(item, tableAliasMap)],
+      isPassthrough: true,
+      expr: item,
+    };
+  }
+
+  // Qualified identifier {ident: ["table", "column"]}
+  if (isQualifiedIdent(item)) {
+    const parts = item.ident;
+    const columnName = parts[parts.length - 1]!;
+    return {
+      alias: columnName,
+      sources: [resolveColumnIdent(item, tableAliasMap)],
       isPassthrough: true,
       expr: item,
     };
@@ -606,7 +658,8 @@ function analyzeSelectItem(
     const [expr, alias] = item;
     if (typeof alias === "string" && !alias.startsWith("%")) {
       const sources = getReferencedColumns(expr as SqlExpr, tableAliasMap);
-      const isPassthrough = typeof expr === "string" && !expr.startsWith("%");
+      // Passthrough if it's just a column reference (string or {ident: [...]})
+      const isPassthrough = (typeof expr === "string" && !expr.startsWith("%")) || isQualifiedIdent(expr);
       return {
         alias,
         sources,
@@ -653,7 +706,25 @@ export function getReferencedColumns(
   const cols: string[] = [];
 
   function walk(e: SqlExpr): void {
-    // Column reference
+    // Qualified identifier {ident: ["table", "column"]}
+    if (isQualifiedIdent(e)) {
+      const parts = e.ident;
+      let resolved: string;
+      if (parts.length > 1) {
+        const tableAlias = parts[0]!;
+        const colName = parts.slice(1).join(".");
+        const tableName = tableAliasMap?.get(tableAlias) ?? tableAlias;
+        resolved = `${tableName}.${colName}`;
+      } else {
+        resolved = parts[0] ?? "";
+      }
+      if (resolved && !cols.includes(resolved)) {
+        cols.push(resolved);
+      }
+      return;
+    }
+
+    // Column reference (string)
     if (typeof e === "string") {
       // Skip operators, functions, keywords
       if (e.startsWith("%")) return;
@@ -698,7 +769,7 @@ export function getReferencedColumns(
 
     // Handle typed values - they're not column references
     if (typeof e === "object" && e !== null) {
-      if ("$" in e || "__raw" in e || "__param" in e || "__lift" in e) return;
+      if ("$" in e || "__raw" in e || "__param" in e || "__lift" in e || "ident" in e) return;
     }
   }
 

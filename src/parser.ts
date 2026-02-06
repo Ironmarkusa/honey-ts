@@ -60,7 +60,16 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
       const ref = expr as ExprRef;
       const name = ref.name;
       if (ref.table) {
-        return `${ref.table.name}.${name}`;
+        // Use array for qualified identifiers to preserve dots in names
+        const tableRef = ref.table as { schema?: string; name: string };
+        if (tableRef.schema) {
+          return { ident: [tableRef.schema, tableRef.name, name] };
+        }
+        return { ident: [ref.table.name, name] };
+      }
+      // Wrap identifiers containing dots to preserve them as single units
+      if (name.includes(".")) {
+        return { ident: [name] };
       }
       return name;
     }
