@@ -209,8 +209,11 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
     case "cast": {
       const cast = expr as ExprCast;
       const value = exprToClause(cast.operand);
-      const typeDef = cast.to as { name?: string; kind?: string };
-      const typeName = typeDef.name ?? typeDef.kind ?? "unknown";
+      const typeDef = cast.to as { name?: string; kind?: string; config?: number[] };
+      let typeName = typeDef.name ?? typeDef.kind ?? "unknown";
+      if (typeDef.config && typeDef.config.length > 0) {
+        typeName = `${typeName}(${typeDef.config.join(",")})`;
+      }
       return ["cast", value, typeName];
     }
 

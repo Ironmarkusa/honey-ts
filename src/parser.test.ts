@@ -257,6 +257,68 @@ describe("quoted identifiers with spaces", () => {
   });
 });
 
+describe("complex real-world round-trip", () => {
+  it("round-trips staging import query with casts, regex, jsonb_build_object, and quoted identifiers", () => {
+    const sql = `SELECT
+      s."Clinic Number"::text AS location_id,
+      to_date(s."Report Data Start Date", 'MM/DD/YYYY') AS period_start,
+      to_date(s."Report Data End Date", 'MM/DD/YYYY') AS period_end,
+      (regexp_replace(s."Sales $", '[$,]', '', 'g')::numeric * 100)::bigint AS revenue_total_cents,
+      s."Total Conversions #"::integer AS txn_total_count,
+      s."Total Conversions #"::integer AS conversions_total,
+      s."NP Conversion #"::integer AS conversions_new,
+      s."EP Conversions #"::integer AS conversions_returning,
+      s."Active Members Begin"::integer AS active_customers_start,
+      s."Active Members End"::integer AS active_customers_end,
+      (regexp_replace(s."Active Member Attrition Rate", '%', '', 'g')::numeric / 100)::numeric(7,4) AS customer_attrition_rate,
+      jsonb_build_object(
+          'membership', (regexp_replace(s."MBR.  Sales $", '[$,]', '', 'g')::numeric * 100)::bigint,
+          'package', (regexp_replace(s."Package Sales $", '[$,]', '', 'g')::numeric * 100)::bigint,
+          'walkin', (regexp_replace(s."Walkin Sales $", '[$,]', '', 'g')::numeric * 100)::bigint,
+          'intro', (regexp_replace(s."Intro Sales $", '[$,]', '', 'g')::numeric * 100)::bigint,
+          '6_pack', (regexp_replace(s."6 Pack Sales $", '[$,]', '', 'g')::numeric * 100)::bigint,
+          '10_pack', (regexp_replace(s."10 Pack Sales $", '[$,]', '', 'g')::numeric * 100)::bigint,
+          '20_pack', (regexp_replace(s."20 Pack Sales $", '[$,]', '', 'g')::numeric * 100)::bigint
+      ) AS revenue_breakdown,
+      jsonb_build_object(
+          'membership', s."Total MBR. Sold #"::integer,
+          'package', s."Total Pack Sold #"::integer,
+          'wellness_plan', s."Total Wellness Plan Sold #"::integer,
+          'flex', s."Total Flex Sold #"::integer,
+          '6_pack', s."6 Pack Sold #"::integer,
+          '10_pack', s."10 Pack Sold #"::integer,
+          '20_pack', s."20 Pack Sold #"::integer
+      ) AS txn_breakdown
+    FROM staging."import_21ab49f41ac2462e931dedfd3ceb3768" s`;
+
+    const clause = fromSql(sql);
+
+    // Verify key structural elements parsed correctly
+    assert.ok(Array.isArray(clause.select));
+    assert.strictEqual((clause.select as unknown[]).length, 13);
+
+    // Verify FROM with schema-qualified quoted table
+    assert.deepStrictEqual(clause.from, [
+      ["staging.import_21ab49f41ac2462e931dedfd3ceb3768", "s"],
+    ]);
+
+    // Verify round-trip via normalizeSql
+    const [resultSql] = toSql(clause, { inline: true, quoted: true });
+    const normalizedInput = normalizeSql(sql);
+    const normalizedOutput = normalizeSql(resultSql);
+    assert.strictEqual(normalizedOutput, normalizedInput);
+
+    // Verify formatted output contains key patterns
+    assert.match(resultSql, /CAST\("s"\."Clinic Number" AS TEXT\) AS "location_id"/);
+    assert.match(resultSql, /TO_DATE\("s"\."Report Data Start Date", 'MM\/DD\/YYYY'\)/);
+    assert.match(resultSql, /REGEXP_REPLACE\("s"\."Sales \$", '\[\$,\]', '', 'g'\)/);
+    assert.match(resultSql, /AS NUMERIC\(7,4\)\)/);
+    assert.match(resultSql, /JSONB_BUILD_OBJECT\(/);
+    assert.match(resultSql, /"s"\."MBR\.  Sales \$"/);
+    assert.match(resultSql, /"staging"\."import_21ab49f41ac2462e931dedfd3ceb3768" AS "s"/);
+  });
+});
+
 describe("normalizeSql", () => {
   it("normalizes whitespace", () => {
     const sql1 = "SELECT   id,  name   FROM   users";

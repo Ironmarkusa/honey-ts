@@ -728,7 +728,7 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
   // CAST
   ["cast", (k, [x, type], ctx) => {
     const [sqlX, ...pX] = formatExpr(x!, ctx);
-    const typeSql = isIdent(type) ? sqlKw(type as string) : formatExpr(type!, ctx)[0];
+    const typeSql = typeof type === "string" ? sqlKw(type) : formatExpr(type!, ctx)[0];
     return [`CAST(${sqlX} AS ${typeSql})`, ...pX];
   }],
 
