@@ -29,7 +29,7 @@ export type SqlRaw = { __raw: string | (string | SqlExpr)[] };
 export type SqlLift = { __lift: unknown };
 
 /** Literal SQL constant (always inlined, never parameterized) */
-export type SqlLiteral = { __literal: unknown };
+export type SqlLiteral = { v: unknown };
 
 /**
  * Typed value - becomes a parameterized value with optional cast
@@ -245,7 +245,7 @@ export const SqlRawSchema = z.object({
 
 export const SqlLiftSchema = z.object({ __lift: z.unknown() });
 
-export const SqlLiteralSchema = z.object({ __literal: z.unknown() });
+export const SqlLiteralSchema = z.object({ v: z.unknown() });
 
 // Recursive schema for expressions
 export const SqlExprSchema: z.ZodType<SqlExpr> = z.lazy(() =>
@@ -341,7 +341,7 @@ export function isLift(x: unknown): x is SqlLift {
 }
 
 export function isLiteral(x: unknown): x is SqlLiteral {
-  return typeof x === "object" && x !== null && "__literal" in x;
+  return typeof x === "object" && x !== null && "v" in x;
 }
 
 // SQL clause keys - these are NOT typed values
@@ -366,8 +366,8 @@ export function isTypedValue(x: unknown): x is SqlTypedValue {
   const keys = Object.keys(x);
   if (keys.length !== 1) return false;
   const key = keys[0]!;
-  // Not a special internal type or a SQL clause key
-  return !key.startsWith("__") && !clauseKeys.has(key);
+  // Not a special internal type, literal value, or a SQL clause key
+  return !key.startsWith("__") && key !== "v" && !clauseKeys.has(key);
 }
 
 export function isClause(x: unknown): x is SqlClause {

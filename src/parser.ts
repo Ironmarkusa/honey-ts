@@ -227,7 +227,7 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
       const memAny = mem as unknown as { op: string };
       const obj = exprToClause(mem.operand);
       // member is a string literal, wrap as literal value
-      const prop = { __literal: mem.member };
+      const prop = { v: mem.member };
       return [memAny.op, obj, prop];
     }
 
@@ -256,16 +256,16 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
     }
 
     case "integer":
-      return { __literal: (expr as ExprInteger).value };
+      return { v: (expr as ExprInteger).value };
 
     case "numeric":
-      return { __literal: (expr as ExprNumeric).value };
+      return { v: (expr as ExprNumeric).value };
 
     case "string":
-      return { __literal: (expr as ExprString).value };
+      return { v: (expr as ExprString).value };
 
     case "boolean":
-      return { __literal: (expr as ExprBool).value };
+      return (expr as ExprBool).value;
 
     case "null":
       return null;

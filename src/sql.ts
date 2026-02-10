@@ -405,7 +405,7 @@ export function formatExpr(expr: SqlExpr, ctx: FormatContext, opts: { nested?: b
 
   // Literal value (always inlined, never parameterized)
   if (isLiteral(expr)) {
-    return [sqlizeValue(expr.__literal)];
+    return [sqlizeValue(expr.v)];
   }
 
   // Typed value: {$: value} or {type: value}
@@ -1582,7 +1582,7 @@ export function lift(value: unknown): SqlExpr {
  * Create a literal SQL constant (always inlined, never parameterized).
  */
 export function literal(value: unknown): SqlExpr {
-  return { __literal: value };
+  return { v: value };
 }
 
 /**
