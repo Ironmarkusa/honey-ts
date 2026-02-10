@@ -11,10 +11,10 @@ import { walkClauses } from "./helpers.js";
 export type SqlOperation = "select" | "insert" | "update" | "delete";
 
 export interface GuardConfig {
-  /** Tables allowed to query (supports "schema.*" wildcards) */
-  allowedTables: string[];
-  /** Operations allowed (select, insert, update, delete) */
-  allowedOperations: SqlOperation[];
+  /** Tables allowed to query (supports "schema.*" wildcards). Omit to allow all. */
+  allowedTables?: string[];
+  /** Operations allowed (select, insert, update, delete). Omit to allow all. */
+  allowedOperations?: SqlOperation[];
   /** Require LIMIT clause on SELECT */
   requireLimit?: boolean;
   /** Max rows for SELECT (only checked if LIMIT present) */
@@ -50,26 +50,29 @@ export function guardSql(clause: SqlClause, config: GuardConfig): GuardResult {
   // Pre-compile table patterns for efficiency
   const exactTables = new Set<string>();
   const schemaPatterns: string[] = [];
-  for (const pattern of config.allowedTables) {
-    if (pattern.endsWith(".*")) {
-      schemaPatterns.push(pattern.slice(0, -2));
-    } else {
-      exactTables.add(pattern);
+  if (config.allowedTables) {
+    for (const pattern of config.allowedTables) {
+      if (pattern.endsWith(".*")) {
+        schemaPatterns.push(pattern.slice(0, -2));
+      } else {
+        exactTables.add(pattern);
+      }
     }
   }
 
+  const checkTables = !!config.allowedTables;
   const isTableAllowed = (table: string): boolean => {
     if (exactTables.has(table)) return true;
     const schema = table.split(".")[0];
     return schemaPatterns.includes(schema!);
   };
 
-  const allowedOps = new Set(config.allowedOperations);
+  const allowedOps = config.allowedOperations ? new Set(config.allowedOperations) : null;
   const requireWhereOps = new Set(config.requireWhere ?? []);
 
   // Check operation type
   const op = getOperation(clause);
-  if (op && !allowedOps.has(op)) {
+  if (op && allowedOps && !allowedOps.has(op)) {
     violations.push(`Operation not allowed: ${op.toUpperCase()}`);
   }
 
@@ -93,10 +96,12 @@ export function guardSql(clause: SqlClause, config: GuardConfig): GuardResult {
   }
 
   // Collect and check all tables (including subqueries)
-  const tables = collectTables(clause);
-  for (const table of tables) {
-    if (!isTableAllowed(table)) {
-      violations.push(`Table not allowed: ${table}`);
+  if (checkTables) {
+    const tables = collectTables(clause);
+    for (const table of tables) {
+      if (!isTableAllowed(table)) {
+        violations.push(`Table not allowed: ${table}`);
+      }
     }
   }
 
