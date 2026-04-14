@@ -143,3 +143,39 @@ export {
   regexMatch,
   textSearch,
 } from "./pg-ops.js";
+
+// ============================================================================
+// Rewrites layer — find/rewrite/modify/apply helpers for clause trees.
+// Power the "parse → a couple of helpers → unparse" philosophy for dynamic SQL.
+// ============================================================================
+
+export * as matchers from "./rewrites/matchers.js";
+export * as find from "./rewrites/find.js";
+export * as rewrite from "./rewrites/rewrite.js";
+export * as modify from "./rewrites/modify.js";
+
+export { apply, applyWith } from "./rewrites/apply.js";
+export type { ClauseTransform, ApplyOptions } from "./rewrites/apply.js";
+
+export {
+  rewriteDateRange,
+  describeDatePredicates,
+} from "./rewrites/date-range.js";
+export type {
+  DatePredicate,
+  RangeStrategy,
+  RewriteDateRangeSpec,
+} from "./rewrites/date-range.js";
+
+export type { Matcher, MatchContext } from "./rewrites/matchers.js";
+export type {
+  Hit,
+  TableHit,
+  JoinHit,
+  SelectHit,
+} from "./rewrites/find.js";
+export type { Replacement } from "./rewrites/rewrite.js";
+export type {
+  AddWhereOptions,
+  AddOrderByOptions,
+} from "./rewrites/modify.js";
