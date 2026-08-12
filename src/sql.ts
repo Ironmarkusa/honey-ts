@@ -50,6 +50,57 @@ function splitBySeparator(s: string, sep: string): string[] {
 // Dialect Configuration
 // ============================================================================
 
+// ---------------------------------------------------------------------------
+// DuckDB operator support
+//
+// DuckDB's parser is a fork of the PostgreSQL grammar, but it is not a superset:
+// most of the jsonb operator family, the full-text `@@` operator and the
+// geometric `<->` operator have no DuckDB equivalent. Behaviour verified against
+// DuckDB v1.5.5 — see duckdb.test.ts for the executable proof of each mapping.
+// ---------------------------------------------------------------------------
+
+/**
+ * PostgreSQL operators DuckDB cannot express. Formatting one throws rather than
+ * emitting SQL that would fail at query time.
+ *
+ * `?|` and `?&` are here rather than in the lowering table because they take a
+ * key *list* whose members would each need their own `json_exists` call; that is
+ * only expressible when the list is statically known, so we refuse instead of
+ * emitting something that silently works for literals and breaks for expressions.
+ */
+const duckdbUnsupportedOps = new Set<string>([
+  "@@",   // full-text search: DuckDB's FTS extension uses match_bm25(), not an operator
+  "<->",  // geometric distance: no point type in DuckDB core
+  "?|",   // "any key exists" over a key list
+  "?&",   // "all keys exist" over a key list
+  "#-",   // delete key at path: no DuckDB equivalent
+]);
+
+/**
+ * PostgreSQL operators rewritten to DuckDB function calls. Each mapping was
+ * executed against DuckDB v1.5.5 before being added here.
+ */
+const duckdbOpLowerings = new Map<string, (args: SqlExpr[]) => SqlExpr>([
+  // Case-insensitive regex: DuckDB has no ~* operator but takes an 'i' flag.
+  ["~*", ([a, b]) => ["%regexp_matches", a!, b!, { v: "i" }]],
+  ["!~*", ([a, b]) => ["not", ["%regexp_matches", a!, b!, { v: "i" }]]],
+  // JSON path access.
+  ["#>", ([a, b]) => ["%json_extract", a!, b!]],
+  ["#>>", ([a, b]) => ["%json_extract_string", a!, b!]],
+  // Key/path existence.
+  ["?", ([a, b]) => ["%json_exists", a!, b!]],
+  ["@?", ([a, b]) => ["%json_exists", a!, b!]],
+  // Containment. PostgreSQL's @> is overloaded across jsonb and arrays; we take
+  // the jsonb reading because that is what pg-ops.ts documents it as.
+  ["@>", ([a, b]) => ["%json_contains", a!, b!]],
+  ["<@", ([a, b]) => ["%json_contains", b!, a!]],
+]);
+
+/** Type names with no DuckDB spelling. */
+const duckdbTypeAliases = new Map<string, string>([
+  ["jsonb", "JSON"],
+]);
+
 const dialects = new Map<string, DialectConfig & { dialect: string }>([
   ["ansi", { dialect: "ansi", quote: (s) => strop('"', s, '"') }],
   ["postgres", { dialect: "postgres", quote: (s) => strop('"', s, '"') }],
@@ -61,6 +112,14 @@ const dialects = new Map<string, DialectConfig & { dialect: string }>([
   ["sqlite", { dialect: "sqlite", quote: (s) => strop('"', s, '"') }],
   ["sqlserver", { dialect: "sqlserver", quote: (s) => strop("[", s, "]"), autoLiftBoolean: true }],
   ["oracle", { dialect: "oracle", quote: (s) => strop('"', s, '"'), as: false }],
+  ["duckdb", {
+    dialect: "duckdb",
+    quote: (s) => strop('"', s, '"'),
+    clauseOrderFn: (order) => addClauseBefore(order, "qualify", "order-by"),
+    unsupportedOps: duckdbUnsupportedOps,
+    opLowerings: duckdbOpLowerings,
+    typeAliases: duckdbTypeAliases,
+  }],
 ]);
 
 // ============================================================================
@@ -344,6 +403,19 @@ export function formatExpr(expr: SqlExpr, ctx: FormatContext, opts: { nested?: b
     const op = normalizeOp(expr[0]);
 
     if (typeof op === "string") {
+      // Dialect operator support. Checked before every other dispatch path so a
+      // dialect can neither silently emit an operator it lacks nor have a
+      // lowering bypassed by the infix/special-syntax tables.
+      if (dialect.unsupportedOps?.has(op)) {
+        throw new Error(
+          `Operator '${op}' is not supported by dialect '${dialect.dialect}'`
+        );
+      }
+      const lowering = dialect.opLowerings?.get(op);
+      if (lowering) {
+        return formatExpr(lowering(expr.slice(1) as SqlExpr[]), ctx, opts);
+      }
+
       // Infix operator
       if (infixOps.has(op)) {
         if (op === "=" || op === "<>") {
@@ -424,15 +496,18 @@ export function formatExpr(expr: SqlExpr, ctx: FormatContext, opts: { nested?: b
       value = JSON.stringify(value);
     }
 
+    // Cast type is dialect-dependent: {jsonb: x} has to emit ::JSON on DuckDB.
+    const castType = type === "$" ? type : mapType(type, ctx);
+
     if (options.inline) {
       const sqlVal = sqlizeValue(value);
-      return type === "$" ? [sqlVal] : [`${sqlVal}::${type}`];
+      return type === "$" ? [sqlVal] : [`${sqlVal}::${castType}`];
     }
     if (options.numbered) {
       const [sql, ...params] = addNumberedParam(value, ctx);
-      return type !== "$" ? [`${sql}::${type}`, ...params] : [sql, ...params];
+      return type !== "$" ? [`${sql}::${castType}`, ...params] : [sql, ...params];
     }
-    return type !== "$" ? [`?::${type}`, value] : ["?", value];
+    return type !== "$" ? [`?::${castType}`, value] : ["?", value];
   }
 
   // Literal value (numbers, booleans - strings are now identifiers)
@@ -443,6 +518,31 @@ export function formatExpr(expr: SqlExpr, ctx: FormatContext, opts: { nested?: b
     return addNumberedParam(expr, ctx);
   }
   return ["?", expr];
+}
+
+/**
+ * Refuse to emit a construct on a dialect that has no syntax for it. Emitting
+ * anyway would produce SQL the target rejects only once it reaches the server.
+ */
+function requireDialect(ctx: FormatContext, required: string, construct: string): void {
+  if (ctx.dialect.dialect !== required) {
+    throw new Error(
+      `${construct} require dialect '${required}', got '${ctx.dialect.dialect}'`
+    );
+  }
+}
+
+/**
+ * Translate a type name for the active dialect, preserving any precision suffix
+ * (`numeric(7,4)` keeps its arguments; only the base name is remapped).
+ */
+function mapType(type: string, ctx: FormatContext): string {
+  const aliases = ctx.dialect.typeAliases;
+  if (!aliases) return type;
+  const match = type.match(/^([A-Za-z_][A-Za-z0-9_ ]*)(\(.*\))?$/);
+  if (!match) return type;
+  const mapped = aliases.get(match[1]!.trim().toLowerCase());
+  return mapped === undefined ? type : mapped + (match[2] ?? "");
 }
 
 function normalizeOp(x: unknown): string | null {
@@ -733,8 +833,96 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
   // CAST
   ["cast", (k, [x, type], ctx) => {
     const [sqlX, ...pX] = formatExpr(x!, ctx);
-    const typeSql = typeof type === "string" ? sqlKw(type) : formatExpr(type!, ctx)[0];
+    const typeSql = typeof type === "string"
+      ? sqlKw(mapType(type, ctx))
+      : formatExpr(type!, ctx)[0];
     return [`CAST(${sqlX} AS ${typeSql})`, ...pX];
+  }],
+
+  // ---------------------------------------------------------------------
+  // DuckDB-specific expression syntax.
+  //
+  // These live in the emitter rather than in a side-effect import so that
+  // `{dialect: "duckdb"}` is complete on its own; each one refuses to emit on
+  // a dialect that has no such syntax rather than producing invalid SQL.
+  // ---------------------------------------------------------------------
+
+  // Star with modifiers: ["star", {table?, exclude?, replace?}]
+  //   ["star", {exclude: ["id"]}]                 -> * EXCLUDE (id)
+  //   ["star", {table: "t", exclude: ["id"]}]     -> t.* EXCLUDE (id)
+  //   ["star", {replace: [[["%lower","n"], "n"]]}] -> * REPLACE (lower(n) AS n)
+  ["star", (k, [spec], ctx) => {
+    requireDialect(ctx, "duckdb", "star modifiers (EXCLUDE/REPLACE)");
+    const s = (spec ?? {}) as {
+      table?: string;
+      exclude?: SqlIdent[];
+      replace?: Array<[SqlExpr, string]>;
+    };
+    const params: unknown[] = [];
+    let sql = s.table ? `${formatEntity(s.table, ctx)}.*` : "*";
+
+    // DuckDB rejects a column appearing in both lists ("Column "x" cannot occur
+    // in both EXCLUDE and REPLACE list"), so refuse before emitting it.
+    if (s.exclude?.length && s.replace?.length) {
+      const excluded = new Set(s.exclude.map((c) => String(c)));
+      const both = s.replace
+        .map(([, alias]) => String(alias))
+        .filter((alias) => excluded.has(alias));
+      if (both.length) {
+        throw new Error(
+          `Column '${both[0]}' cannot appear in both EXCLUDE and REPLACE`
+        );
+      }
+    }
+
+    if (s.exclude?.length) {
+      const cols = s.exclude.map((c) => formatEntity(c, ctx));
+      sql += ` EXCLUDE (${cols.join(", ")})`;
+    }
+    if (s.replace?.length) {
+      const parts = s.replace.map(([expr, alias]) => {
+        const [exprSql, ...p] = formatExpr(expr, ctx);
+        params.push(...p);
+        return `${exprSql} AS ${formatEntity(alias, ctx, { aliased: true })}`;
+      });
+      sql += ` REPLACE (${parts.join(", ")})`;
+    }
+    return [sql, ...params];
+  }],
+
+  // List literal: ["list", a, b, c] -> [a, b, c]
+  ["list", (k, args, ctx) => {
+    requireDialect(ctx, "duckdb", "list literals");
+    const [sqls, params] = formatExprList(args, ctx);
+    return [`[${sqls.join(", ")}]`, ...params];
+  }],
+
+  // Struct literal: ["struct", ["a", expr], ["b", expr]] -> {'a': expr, 'b': expr}
+  ["struct", (k, pairs, ctx) => {
+    requireDialect(ctx, "duckdb", "struct literals");
+    const params: unknown[] = [];
+    const parts = pairs.map((pair) => {
+      if (!Array.isArray(pair) || pair.length !== 2) {
+        throw new Error(`struct expects [key, value] pairs, got: ${JSON.stringify(pair)}`);
+      }
+      const [key, value] = pair as [string, SqlExpr];
+      const [valueSql, ...p] = formatExpr(value, ctx);
+      params.push(...p);
+      return `${sqlizeValue(String(key))}: ${valueSql}`;
+    });
+    return [`{${parts.join(", ")}}`, ...params];
+  }],
+
+  // Lambda: ["lambda", "x", expr] -> x -> expr
+  //         ["lambda", ["x","y"], expr] -> (x, y) -> expr
+  ["lambda", (k, [params_, body], ctx) => {
+    requireDialect(ctx, "duckdb", "lambda expressions");
+    const names = Array.isArray(params_) ? params_ : [params_];
+    const head = names.length === 1
+      ? formatEntity(names[0] as SqlIdent, ctx)
+      : `(${names.map((n) => formatEntity(n as SqlIdent, ctx)).join(", ")})`;
+    const [bodySql, ...p] = formatExpr(body!, ctx);
+    return [`${head} -> ${bodySql}`, ...p];
   }],
 
   // BETWEEN
@@ -785,8 +973,25 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
       return [`ARRAY(${sql})`, ...p];
     }
 
-    // Check if first arg is an array (old format: ["array", [elements], type?])
-    if (args.length >= 1 && Array.isArray(args[0]) && !isClause(args[0])) {
+    // Old format: ["array", [elements], type?] — where `type` is a type NAME.
+    //
+    // This must not swallow a nested array expression such as
+    //   ["array", ["array", 1, 2], ["array", 3, 4]]   (ARRAY[[1,2],[3,4]])
+    // whose args[0] is itself an expression and whose args[1] is another
+    // expression rather than a type string. Requiring args[0] to be a plain
+    // element list, and any second arg to be a string, keeps the two apart.
+    const isExprHeaded = (x: unknown): boolean =>
+      Array.isArray(x) &&
+      typeof x[0] === "string" &&
+      (x[0].startsWith("%") ||
+        infixOps.has(x[0].toLowerCase()) ||
+        specialSyntax.has(x[0].toLowerCase()));
+
+    if (
+      args.length >= 1 && args.length <= 2 &&
+      Array.isArray(args[0]) && !isClause(args[0]) && !isExprHeaded(args[0]) &&
+      (args.length === 1 || typeof args[1] === "string")
+    ) {
       const [arr, type] = args;
       const [sqls, params] = formatExprList(arr as SqlExpr[], ctx);
       const typeSuffix = type ? `::${sqlKw(type as string)}[]` : "";
@@ -951,8 +1156,14 @@ function formatSelects(k: string, xs: unknown, ctx: FormatContext): FormatResult
       typeof item[1] === "string" &&
       isIdent(item[1]) &&
       !item[1].startsWith("%") &&
-      // First element must NOT be a function/operator that takes item[1] as argument
-      !(typeof item[0] === "string" && (item[0].startsWith("%") || infixOps.has(item[0])));
+      // First element must NOT be a function/operator/construct that takes
+      // item[1] as an argument. Without the specialSyntax check, a one-argument
+      // construct such as ["list", "a"] or ["struct", "a"] would be misread as
+      // "select column `list` aliased as `a`".
+      !(typeof item[0] === "string" &&
+        (item[0].startsWith("%") ||
+          infixOps.has(item[0]) ||
+          specialSyntax.has(item[0].toLowerCase())));
 
     if (isAliasForm) {
       // [expr, alias] form
@@ -1140,6 +1351,9 @@ function formatOnExpr(k: string, e: unknown, ctx: FormatContext): FormatResult {
 
 clauseFormatters.set("where", formatOnExpr);
 clauseFormatters.set("having", formatOnExpr);
+// DuckDB QUALIFY — filters on window function results, after HAVING/WINDOW and
+// before ORDER BY. Only reachable on dialects whose clause order includes it.
+clauseFormatters.set("qualify", formatOnExpr);
 
 // GROUP BY
 clauseFormatters.set("group-by", (k, xs, ctx) => {
@@ -1178,6 +1392,12 @@ clauseFormatters.set("offset", formatOnExpr);
 
 // VALUES
 clauseFormatters.set("values", (k, xs, ctx) => {
+  // INSERT INTO t SELECT ... — the source is a query, not a row list. It emits
+  // as a bare subquery because `INSERT INTO t VALUES SELECT ...` is not SQL.
+  if (isClause(xs)) {
+    return formatDsl(xs as SqlClause, ctx);
+  }
+
   const rows = xs as Record<string, SqlExpr>[] | SqlExpr[][];
 
   if (rows.length === 0) {
@@ -1544,6 +1764,24 @@ export function registerOp(op: string, opts: { ignoreNil?: boolean } = {}): void
   if (opts.ignoreNil) {
     opIgnoreNil.add(op.toLowerCase());
   }
+}
+
+/**
+ * Register a SQL dialect, or override a built-in one.
+ *
+ * Dialects carry their own operator support so that a clause map targeting one
+ * dialect cannot silently emit invalid SQL for another — see DialectConfig.
+ */
+export function registerDialect(
+  name: string,
+  config: DialectConfig
+): void {
+  dialects.set(name, { ...config, dialect: name });
+}
+
+/** Look up a registered dialect. */
+export function getDialect(name: string): (DialectConfig & { dialect: string }) | undefined {
+  return dialects.get(name);
 }
 
 /**

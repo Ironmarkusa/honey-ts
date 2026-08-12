@@ -144,6 +144,10 @@ export {
   textSearch,
 } from "./pg-ops.js";
 
+// Dialect registration. The built-in dialects (including duckdb) are always
+// available via format(clause, {dialect}); registerDialect adds custom ones.
+export { registerDialect, getDialect } from "./sql.js";
+
 // ============================================================================
 // Rewrites layer — find/rewrite/modify/apply helpers for clause trees.
 // Power the "parse → a couple of helpers → unparse" philosophy for dynamic SQL.

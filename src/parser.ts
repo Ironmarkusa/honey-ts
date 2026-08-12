@@ -656,27 +656,34 @@ function statementToClause(stmt: Statement): SqlClause {
   }
 }
 
-/** CTE (WITH) statement */
+/**
+ * CTE (WITH) statement.
+ *
+ * Both the CTE bodies and the outer statement may be data-modifying — DuckDB
+ * and PostgreSQL both accept `WITH d AS (DELETE FROM t RETURNING i) SELECT ...`
+ * and `WITH x AS (...) UPDATE ...` — so neither is typed as a SELECT.
+ */
 type WithStatement = {
   type: "with";
   bind: Array<{
     alias: { name: string };
-    statement: SelectFromStatement;
+    statement: Statement;
   }>;
-  in: SelectFromStatement;
+  in: Statement;
 };
 
 function withToClause(stmt: WithStatement): SqlClause {
   const clause: SqlClause = {};
 
-  // Convert each CTE
+  // Convert each CTE. Dispatching through statementToClause rather than
+  // selectToClause is what makes data-modifying CTEs work.
   clause.with = stmt.bind.map((cte) => [
     cte.alias.name,
-    selectToClause(cte.statement),
+    statementToClause(cte.statement),
   ] as [string, SqlClause]);
 
   // Merge the main query
-  const mainQuery = selectToClause(stmt.in);
+  const mainQuery = statementToClause(stmt.in);
   return { ...clause, ...mainQuery };
 }
 

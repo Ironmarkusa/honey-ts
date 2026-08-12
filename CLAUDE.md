@@ -283,6 +283,93 @@ result.warnings.forEach((w) => {
 });
 ```
 
+## Dialects
+
+`toSql`/`format` take a dialect. The default is `postgres`; `duckdb` is fully
+supported.
+
+```typescript
+import { format } from 'honey-ts';
+
+format(clause, { dialect: 'duckdb' });
+```
+
+**DuckDB is not a superset of PostgreSQL.** Its parser is a fork of the Postgres
+grammar, but 13 of the operators `pg-ops` registers have no DuckDB equivalent.
+The dialect handles this in three ways:
+
+| PostgreSQL | DuckDB | behaviour |
+|---|---|---|
+| `~*` `!~*` | `regexp_matches(s, p, 'i')` | lowered automatically |
+| `#>` `#>>` | `json_extract` / `json_extract_string` | lowered automatically |
+| `?` `@?` | `json_exists` | lowered automatically |
+| `@>` `<@` | `json_contains` | lowered automatically |
+| `jsonb` | `JSON` | type alias |
+| `@@` `<->` `?\|` `?&` `#-` | — | **throws** |
+
+Emitting an unsupported operator throws rather than producing SQL that would
+fail at query time:
+
+```typescript
+format({ select: [['@@', 'doc', { v: 'x' }]] }, { dialect: 'duckdb' });
+// Error: Operator '@@' is not supported by dialect 'duckdb'
+```
+
+### DuckDB-specific syntax
+
+These constructs throw on any other dialect:
+
+```typescript
+// SELECT * EXCLUDE (id) REPLACE (lower(name) AS name)
+{ select: [['star', { exclude: ['id'], replace: [[['%lower', 'name'], 'name']] }]] }
+
+// [1, 2, 3]
+['list', { v: 1 }, { v: 2 }, { v: 3 }]
+
+// {'a': 1, 'b': 'x'}
+['struct', ['a', { v: 1 }], ['b', { v: 'x' }]]
+
+// list_transform([1,2], x -> x + 1)
+['%list_transform', ['list', { v: 1 }, { v: 2 }], ['lambda', 'x', ['+', 'x', { v: 1 }]]]
+
+// QUALIFY (clause key, emitted after HAVING and before ORDER BY)
+{ select: ['a'], from: ['t'], qualify: ['=', ['%row_number'], { v: 1 }] }
+```
+
+### DuckDB function catalog
+
+`honey-ts/duckdb-ops` exposes 799 functions generated from DuckDB's own
+`duckdb_functions()` catalog — names, argument names/types, return types,
+descriptions and overloads — plus the reserved-keyword set:
+
+```typescript
+import { DUCKDB_FUNCTIONS_BY_NAME, DUCKDB_AGGREGATES } from 'honey-ts/duckdb-ops';
+
+DUCKDB_FUNCTIONS_BY_NAME.get('date_trunc');
+// { name: '%date_trunc', label: 'DATE_TRUNC', description: 'Truncate to specified precision',
+//   returnType: 'TIMESTAMP', args: [{name:'part',type:'VARCHAR'}, ...], overloads: [...] }
+```
+
+Regenerate after a DuckDB version bump (requires the `@duckdb/node-api`
+devDependency) and review the diff:
+
+```bash
+npm run gen:duckdb-ops
+```
+
+### Known limitations
+
+- The `fromSql` front end is a PostgreSQL parser, so DuckDB-only *input* syntax
+  (`EXCLUDE`, `QUALIFY`, list/struct literals, lambdas) does not parse. It
+  parses ~63% of DuckDB's own test corpus; of what parses, 95.6% round-trips
+  back to SQL DuckDB accepts.
+- Data-modifying CTEs (`WITH d AS (DELETE ... RETURNING ...) SELECT`) parse and
+  emit, but DuckDB rejects them — they are PostgreSQL-only.
+- `E'...'` escape-string literals fail upstream in `pgsql-ast-parser`.
+- Integer division differs semantically: `5/2` is `2` on PostgreSQL and `2.5` on
+  DuckDB. The dialect layer does not rewrite this, because doing so correctly
+  needs operand types.
+
 ## SQL Guard (LLM Validation)
 
 For validating LLM-generated SQL:
