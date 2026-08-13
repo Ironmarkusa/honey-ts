@@ -1,0 +1,24 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # The full suite includes the DuckDB corpus round-trip: 23k statements
+      # from DuckDB's own test suite, emitted and validated against a live
+      # DuckDB parser (@duckdb/node-api), with parse/acceptance baselines
+      # enforced as regression floors.
+      - run: npm test
+      - run: npm run build

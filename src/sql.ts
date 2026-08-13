@@ -101,17 +101,13 @@ const duckdbTypeAliases = new Map<string, string>([
   ["jsonb", "JSON"],
 ]);
 
+// PostgreSQL and DuckDB are the supported dialects. The HoneySQL port's
+// mysql/sqlite/sqlserver/oracle stubs were removed: they were untested, and
+// quote-when-necessary emission would silently under-quote their reserved
+// words (`SELECT rank, key FROM t` is broken MySQL). registerDialect() is the
+// path back if one is ever needed — with its own reserved-word handling.
 const dialects = new Map<string, DialectConfig & { dialect: string }>([
-  ["ansi", { dialect: "ansi", quote: (s) => strop('"', s, '"') }],
   ["postgres", { dialect: "postgres", quote: (s) => strop('"', s, '"') }],
-  ["mysql", {
-    dialect: "mysql",
-    quote: (s) => strop("`", s, "`"),
-    clauseOrderFn: (order) => addClauseBefore(order, "set", "where"),
-  }],
-  ["sqlite", { dialect: "sqlite", quote: (s) => strop('"', s, '"') }],
-  ["sqlserver", { dialect: "sqlserver", quote: (s) => strop("[", s, "]"), autoLiftBoolean: true }],
-  ["oracle", { dialect: "oracle", quote: (s) => strop('"', s, '"'), as: false }],
   ["duckdb", {
     dialect: "duckdb",
     quote: (s) => strop('"', s, '"'),
@@ -202,7 +198,13 @@ interface FormatContext {
 
 function createContext(opts: FormatOptions): FormatContext {
   const dialectName = opts.dialect ?? "postgres";
-  const dialect = dialects.get(dialectName) ?? dialects.get("ansi")!;
+  const dialect = dialects.get(dialectName);
+  if (!dialect) {
+    throw new Error(
+      `Unknown dialect '${dialectName}'. Supported: ${[...dialects.keys()].join(", ")}. ` +
+        `Use registerDialect() to add a custom dialect.`
+    );
+  }
 
   const clauseOrder = dialect.clauseOrderFn
     ? dialect.clauseOrderFn([...defaultClauseOrder])

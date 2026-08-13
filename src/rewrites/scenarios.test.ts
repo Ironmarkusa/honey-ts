@@ -253,7 +253,7 @@ describe("scenario: DuckDB-only syntax — fromSql throws (caller handles fallba
   it("EXCLUDE clause is unparseable — caller must try/catch", () => {
     assert.throws(
       () => fromSql(`SELECT * EXCLUDE (secret) FROM users`),
-      /Syntax error|Unexpected/
+      /could not parse/
     );
   });
 
@@ -263,7 +263,7 @@ describe("scenario: DuckDB-only syntax — fromSql throws (caller handles fallba
         fromSql(
           `SELECT channel FROM t QUALIFY ROW_NUMBER() OVER (PARTITION BY channel ORDER BY spend DESC) = 1`
         ),
-      /Syntax error|Unexpected/
+      /could not parse/
     );
   });
 });

@@ -27,10 +27,12 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "!src/**/*.test.ts",
+    "!dist/**/*.test.*"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "prepare": "npm run build",
     "test": "node --test --import tsx src/*.test.ts src/rewrites/*.test.ts",
     "gen:duckdb-ops": "tsx scripts/gen-duckdb-ops.ts",

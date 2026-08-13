@@ -195,12 +195,12 @@ export interface SqlClause {
 
 export interface FormatOptions {
   /** SQL dialect */
-  dialect?: "ansi" | "postgres" | "mysql" | "sqlite" | "sqlserver" | "oracle" | "duckdb";
+  dialect?: "postgres" | "duckdb" | (string & {});
   /**
-   * Identifier quoting. `true` (default) quotes every identifier — exact
-   * semantics, immune to reserved words and PostgreSQL case folding.
-   * `false` quotes only when necessary (reserved words, non-lowercase names,
-   * special characters, `quotedAlways` matches) for more readable SQL.
+   * Identifier quoting. Default: quote only when necessary — bare lowercase
+   * names stay bare; reserved words, non-lowercase names, special characters
+   * and `quotedAlways` matches are quoted. `quoted: true` force-quotes every
+   * identifier (exact-name semantics).
    */
   quoted?: boolean;
   /** Convert dashes to underscores even when quoted */
@@ -290,7 +290,7 @@ export const SqlExprSchema: z.ZodType<SqlExpr> = z.lazy(() =>
 export const SqlClauseSchema: z.ZodType<SqlClause> = z.record(z.string(), z.unknown());
 
 export const FormatOptionsSchema = z.object({
-  dialect: z.enum(["ansi", "postgres", "mysql", "sqlite", "sqlserver", "oracle"]).optional(),
+  dialect: z.string().optional(),
   quoted: z.boolean().optional(),
   quotedSnake: z.boolean().optional(),
   quotedAlways: z.instanceof(RegExp).optional(),

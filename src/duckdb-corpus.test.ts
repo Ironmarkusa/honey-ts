@@ -57,7 +57,7 @@ const BASELINE = {
 
 /** Errors that mean "this front end does not support that syntax", not "bug". */
 const EXPECTED_PARSE_FAILURE =
-  /Syntax error|Unexpected end of input|invalid syntax|Ambiguous SQL syntax|Bad escaped character|Unexpected input|not supported|Expected /i;
+  /could not parse|Syntax error|Unexpected end of input|invalid syntax|Ambiguous SQL syntax|Bad escaped character|Unexpected input|not supported|Expected /i;
 
 interface Outcome {
   total: number;

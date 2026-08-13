@@ -851,6 +851,32 @@ const duckDbStatementCtx: StatementParseContext = {
   },
 };
 
+/**
+ * Wrap the underlying parser's error into something readable. nearley's
+ * default message is a wall of fifty expected-token names; the position and a
+ * source snippet are what a human actually needs. The original error is kept
+ * as `cause`.
+ */
+function parseError(sql: string, dialect: string, e: unknown): Error {
+  const message = e instanceof Error ? e.message : String(e);
+  const posMatch = /line (\d+) col (\d+)/.exec(message);
+  let where = "";
+  if (posMatch) {
+    const line = Number(posMatch[1]);
+    const col = Number(posMatch[2]);
+    const source = sql.split("\n")[line - 1] ?? "";
+    const start = Math.max(0, col - 31);
+    const snippet = source.slice(start, col + 29);
+    const caret = " ".repeat(col - 1 - start) + "^";
+    where = ` at line ${line}, column ${col}:\n  ${snippet}\n  ${caret}`;
+  }
+  const err = new Error(
+    `fromSql could not parse this statement (dialect: ${dialect})${where}`
+  );
+  (err as Error & { cause?: unknown }).cause = e;
+  return err;
+}
+
 export function fromSql(
   sql: string,
   options: FromSqlOptions & { dialect: "duckdb" }
@@ -863,7 +889,12 @@ export function fromSql(sql: string, options: FromSqlOptions = {}): SqlClause {
     const dispatched = parseDuckDbStatement(sql, duckDbStatementCtx);
     if (dispatched) return dispatched as DuckDBClause;
 
-    const stmt = parseFirst(preprocessDuckDb(sql));
+    let stmt: Statement;
+    try {
+      stmt = parseFirst(preprocessDuckDb(sql));
+    } catch (e) {
+      throw parseError(sql, "duckdb", e);
+    }
     return reviveSentinels(statementToClause(stmt), {
       parseStatement: (raw) => {
         const parsed = parseDuckDbStatement(raw, duckDbStatementCtx);
@@ -871,7 +902,12 @@ export function fromSql(sql: string, options: FromSqlOptions = {}): SqlClause {
       },
     }) as DuckDBClause;
   }
-  const stmt = parseFirst(sql);
+  let stmt: Statement;
+  try {
+    stmt = parseFirst(sql);
+  } catch (e) {
+    throw parseError(sql, "postgres", e);
+  }
   return statementToClause(stmt);
 }
 
