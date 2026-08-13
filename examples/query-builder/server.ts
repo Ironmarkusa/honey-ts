@@ -14,13 +14,83 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
-  fromSql, modify, paths, $, type SqlClause, type SqlExpr,
+  fromSql, modify, paths, $, createEnv,
+  type SqlClause, type SqlExpr, type Env, type DatabaseSchema,
 } from "../../src/index.js";
+import { DUCKDB_FUNCTIONS_BY_NAME } from "../../src/duckdb-ops.generated.js";
 import type { Path } from "../../src/paths.js";
 import { renderBuilder, renderOutput, renderStatus } from "./render.js";
 
 const PORT = Number(process.env.PORT ?? 4321);
 const here = dirname(fileURLToPath(import.meta.url));
+
+// ============================================================================
+// Demo schema — lets the env infer column types, so operator dropdowns are
+// enumerated per type (text vs numeric vs timestamp vs json).
+// ============================================================================
+
+const DEMO_SCHEMA: DatabaseSchema = {
+  tables: [
+    {
+      name: "users", schema: "public",
+      columns: [
+        { name: "id", type: "integer", nullable: false, isPrimaryKey: true },
+        { name: "company_id", type: "integer", nullable: true, isForeignKey: true, references: { table: "companies", column: "id" } },
+        { name: "email", type: "text", nullable: false },
+        { name: "name", type: "text", nullable: true },
+        { name: "plan", type: "text", nullable: false },
+        { name: "gmv_cents", type: "bigint", nullable: false },
+        { name: "created_at", type: "timestamp", nullable: false },
+      ],
+    },
+    {
+      name: "orders", schema: "public",
+      columns: [
+        { name: "id", type: "integer", nullable: false, isPrimaryKey: true },
+        { name: "user_id", type: "integer", nullable: false, isForeignKey: true, references: { table: "users", column: "id" } },
+        { name: "tenant_id", type: "text", nullable: false },
+        { name: "status", type: "text", nullable: false },
+        { name: "total", type: "numeric", nullable: false },
+        { name: "placed_at", type: "timestamp", nullable: false },
+        { name: "meta", type: "jsonb", nullable: true },
+        { name: "region", type: "text", nullable: true },
+        { name: "plan", type: "text", nullable: true },
+      ],
+    },
+    {
+      name: "companies", schema: "public",
+      columns: [
+        { name: "id", type: "integer", nullable: false, isPrimaryKey: true },
+        { name: "name", type: "text", nullable: false },
+        { name: "region", type: "text", nullable: true },
+      ],
+    },
+    {
+      name: "refunds", schema: "public",
+      columns: [
+        { name: "id", type: "integer", nullable: false, isPrimaryKey: true },
+        { name: "order_id", type: "integer", nullable: false, isForeignKey: true, references: { table: "orders", column: "id" } },
+      ],
+    },
+    {
+      name: "events", schema: "public",
+      columns: [
+        { name: "id", type: "integer", nullable: false, isPrimaryKey: true },
+        { name: "ts", type: "timestamp", nullable: false },
+        { name: "total", type: "numeric", nullable: true },
+        { name: "status", type: "text", nullable: true },
+        { name: "payload", type: "jsonb", nullable: true },
+        { name: "raw_payload", type: "text", nullable: true },
+      ],
+    },
+  ],
+};
+
+const ENVS: Record<string, Env> = {
+  postgres: createEnv({ dialect: "postgres", schema: DEMO_SCHEMA }),
+  duckdb: createEnv({ dialect: "duckdb", schema: DEMO_SCHEMA, catalog: DUCKDB_FUNCTIONS_BY_NAME }),
+};
+const envFor = (dialect: string): Env => ENVS[dialect] ?? ENVS.postgres;
 
 // ============================================================================
 // Datastar SSE protocol (v1.0.0): patch-elements / patch-signals
@@ -76,14 +146,14 @@ function getDoc(signals: Signals): SqlClause | null {
   }
 }
 
-/** "42" → 42, "null" → null, anything else → string. */
-function coerceValue(raw: string): SqlExpr {
+/** "42" → 42, "null" → null, "true" → true, anything else → string. */
+function coerceScalar(raw: string): unknown {
   const t = raw.trim();
   if (t.toLowerCase() === "null") return null;
-  if (t.toLowerCase() === "true") return $(true) as SqlExpr;
-  if (t.toLowerCase() === "false") return $(false) as SqlExpr;
-  if (/^-?\d+(\.\d+)?$/.test(t)) return $(Number(t)) as SqlExpr;
-  return $(t) as SqlExpr;
+  if (t.toLowerCase() === "true") return true;
+  if (t.toLowerCase() === "false") return false;
+  if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
+  return t;
 }
 
 const BLANK_CONDITION: SqlExpr = ["=", "column", { $: "value" }];
@@ -97,8 +167,8 @@ function respond(
 ): void {
   sseStart(res);
   patchSignals(res, { docjson: doc ? JSON.stringify(doc) : "" });
-  patchElements(res, renderBuilder(doc, dialect));
-  patchElements(res, renderOutput(doc, dialect));
+  patchElements(res, renderBuilder(doc, dialect, envFor(dialect)));
+  patchElements(res, renderOutput(doc, dialect, envFor(dialect)));
   patchElements(res, renderStatus(status));
   res.end();
 }
@@ -132,16 +202,84 @@ const routes: Record<string, Handler> = {
     respond(res, getDoc(signals), signals.dialect ?? "postgres");
   },
 
-  "/set": (res, signals, query) => {
+  // Edit any leaf slot. kind: ident | param | lit | fn.
+  "/edit": (res, signals, query) => {
     const doc = getDoc(signals);
     if (!doc) return respond(res, null, signals.dialect ?? "postgres");
     const path = JSON.parse(query.get("path") ?? "[]") as Path;
-    const slot = query.get("slot");
+    const kind = query.get("kind") ?? "ident";
     const edit = signals.edit ?? "";
-    const slotIndex = slot === "op" ? 0 : slot === "col" ? 1 : 2;
     const value: SqlExpr =
-      slot === "value" ? coerceValue(edit) : (edit.trim() as SqlExpr);
-    const next = paths.setAt(doc, [...path, slotIndex], value);
+      kind === "param" ? ({ $: coerceScalar(edit) } as SqlExpr)
+      : kind === "lit" ? ({ v: coerceScalar(edit) } as SqlExpr)
+      : kind === "fn" ? (("%" + edit.trim().replace(/^%/, "").toLowerCase()) as SqlExpr)
+      : (edit.trim() as SqlExpr);
+    respond(res, paths.setAt(doc, path, value), signals.dialect ?? "postgres");
+  },
+
+  // Change a predicate's operator, reshaping the node when the new operator
+  // wants a different value shape (single / none / list / range).
+  "/set-op": (res, signals, query) => {
+    const doc = getDoc(signals);
+    if (!doc) return respond(res, null, signals.dialect ?? "postgres");
+    const dialect = signals.dialect ?? "postgres";
+    const path = JSON.parse(query.get("path") ?? "[]") as Path;
+    const op = (signals.edit ?? "").trim();
+    const env = envFor(dialect);
+
+    // op → valueType, from the env's operator table across common types.
+    let shape: "single" | "none" | "list" | "range" = "single";
+    for (const t of ["text", "integer", "numeric", "timestamp", "jsonb"]) {
+      const hit = env.operatorsFor(t).find((o) => o.op === op);
+      if (hit) { shape = hit.valueType as typeof shape; break; }
+    }
+
+    const next = paths.updateAt(doc, path, (node) => {
+      const arr = node as SqlExpr[];
+      const lhs = arr[1];
+      const prev = arr[2];
+      const prevScalar: SqlExpr =
+        prev !== undefined && prev !== null && !Array.isArray(prev)
+          ? prev
+          : Array.isArray(prev) && prev.length ? (prev[0] as SqlExpr) : ({ $: "" } as SqlExpr);
+      switch (shape) {
+        case "none": return [op, lhs, null];
+        case "list": return [op, lhs, Array.isArray(prev) ? prev : [prevScalar]];
+        case "range": return [op, lhs, prevScalar, { $: 100 } as SqlExpr];
+        default: return [op, lhs, prevScalar];
+      }
+    });
+    respond(res, next, dialect);
+  },
+
+  // Change an arithmetic/concat head in place (same arity, no reshape).
+  "/set-head": (res, signals, query) => {
+    const doc = getDoc(signals);
+    if (!doc) return respond(res, null, signals.dialect ?? "postgres");
+    const path = JSON.parse(query.get("path") ?? "[]") as Path;
+    respond(res, paths.setAt(doc, [...path, 0], (signals.edit ?? "").trim() as SqlExpr), signals.dialect ?? "postgres");
+  },
+
+  // Append a value to an IN-list.
+  "/add-item": (res, signals, query) => {
+    const doc = getDoc(signals);
+    if (!doc) return respond(res, null, signals.dialect ?? "postgres");
+    const path = JSON.parse(query.get("path") ?? "[]") as Path;
+    const next = paths.updateAt(doc, path, (node) => [
+      ...(node as SqlExpr[]),
+      { $: "" } as SqlExpr,
+    ]);
+    respond(res, next, signals.dialect ?? "postgres");
+  },
+
+  // Strip a wrapper (e.g. NOT) — replaces the node with its operand.
+  "/unwrap": (res, signals, query) => {
+    const doc = getDoc(signals);
+    if (!doc) return respond(res, null, signals.dialect ?? "postgres");
+    const path = JSON.parse(query.get("path") ?? "[]") as Path;
+    const next = paths.updateAt(doc, path, (node) =>
+      Array.isArray(node) && node.length >= 2 ? (node[1] as SqlExpr) : (node as SqlExpr)
+    );
     respond(res, next, signals.dialect ?? "postgres");
   },
 

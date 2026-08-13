@@ -2,11 +2,17 @@
  * HTML renderers for the query-builder demo. Pure functions: clause document
  * in, HTML fragment out. All user-derived text is escaped; every interactive
  * element carries the path of the node it edits.
+ *
+ * The heart is renderExpr: a recursive editor over the clause data. Idents,
+ * parameters and literals become inputs; operator applications get a dropdown
+ * enumerated from the env's typed operator table (arity-aware — the server
+ * reshapes the node when the new operator wants a different value shape);
+ * function calls, casts, lambdas, subscripts, CASE and star-modifiers all
+ * break down structurally. Anything unrecognized falls back to a SQL chip.
  */
 
 import {
-  format, createEnv, paths as _paths,
-  type SqlClause, type SqlExpr, type Env,
+  format, type SqlClause, type SqlExpr, type Env,
 } from "../../src/index.js";
 import type { Path } from "../../src/paths.js";
 
@@ -24,24 +30,6 @@ function exprSql(expr: SqlExpr, dialect: string): string {
   } catch {
     return JSON.stringify(expr);
   }
-}
-
-/**
- * Render a select/from item, honoring `[expr, alias]` pairs — in expression
- * position those would format as tuples (`(SUM(x), revenue)`) or calls
- * (`users(u)`), which is not what a chip should say.
- */
-function itemSql(item: SqlExpr, dialect: string): string {
-  if (
-    Array.isArray(item) &&
-    item.length === 2 &&
-    typeof item[1] === "string" &&
-    !item[1].startsWith("%") &&
-    !(typeof item[0] === "string" && item[0].startsWith("%"))
-  ) {
-    return `${exprSql(item[0] as SqlExpr, dialect)} AS ${String(item[1])}`;
-  }
-  return exprSql(item, dialect);
 }
 
 // ============================================================================
@@ -62,108 +50,347 @@ const chip = (inner: string, path: Path | null) => `
 const sectionLabel = (label: string) => `
   <div class="mb-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500">${label}</div>`;
 
+/** Mono punctuation / keyword atoms. */
+const punct = (s: string) => `<span class="font-mono text-xs text-slate-500">${s}</span>`;
+const kw = (s: string) => `<span class="font-mono text-[10px] font-bold tracking-wider text-violet-300">${s}</span>`;
+
+/** Width that tracks content length (mono font, so ch units are exact). */
+const grow = (s: string, min = 2) =>
+  `style="width: calc(${Math.max(min, s.length)}ch + 1.25rem)"`;
+
+const INPUT_BASE =
+  "rounded-md border border-slate-700/80 bg-slate-900 px-2 py-1 font-mono text-xs outline-none focus:border-sky-500";
+
+/** An editable slot. kind: ident | param | lit | fn | type. */
+function slot(value: string, path: Path, kindName: string, color: string): string {
+  return `<input value="${esc(value)}" spellcheck="false" ${grow(value)}
+    data-on:change="$edit = evt.target.value; @post('/edit?path=${p(path)}&kind=${kindName}')"
+    class="${INPUT_BASE} ${color}"/>`;
+}
+
+// ============================================================================
+// Operator metadata (from the env's typed table)
+// ============================================================================
+
+type OpInfo = { op: string; label: string; valueType: "single" | "none" | "list" | "range" };
+
+const FALLBACK_TYPES = ["text", "integer", "numeric", "timestamp", "jsonb"];
+
+/** Operators to offer for a given LHS, typed when inference succeeds. */
+function opsForLhs(lhs: SqlExpr, doc: SqlClause, env: Env): OpInfo[] {
+  let types: string[] | null = null;
+  try {
+    const t = env.typeOf(doc, lhs)?.type;
+    if (t) types = [t];
+  } catch { /* inference is best-effort */ }
+  const seen = new Map<string, OpInfo>();
+  for (const t of types ?? FALLBACK_TYPES) {
+    for (const op of env.operatorsFor(t)) {
+      if (!seen.has(op.op)) seen.set(op.op, op as OpInfo);
+    }
+  }
+  // A typed list can be narrow — make sure the basics are always offerable.
+  if (types) {
+    for (const op of env.operatorsFor("text")) {
+      if ((op.op === "=" || op.op === "<>") && !seen.has(op.op)) seen.set(op.op, op as OpInfo);
+    }
+  }
+  return [...seen.values()];
+}
+
+const SHAPE_LABEL: Record<OpInfo["valueType"], string> = {
+  single: "compare", none: "null checks", list: "lists", range: "ranges",
+};
+
+function opSelect(current: string, ops: OpInfo[], path: Path): string {
+  if (!ops.some((o) => o.op === current)) {
+    ops = [{ op: current, label: current, valueType: "single" }, ...ops];
+  }
+  const groups: Record<string, OpInfo[]> = {};
+  for (const o of ops) (groups[o.valueType] ??= []).push(o);
+  const body = (["single", "none", "list", "range"] as const)
+    .filter((s) => groups[s]?.length)
+    .map((s) => `<optgroup label="${SHAPE_LABEL[s]}">${groups[s]
+      .map((o) => `<option value="${esc(o.op)}" title="${esc(o.label)}" ${o.op === current ? "selected" : ""}>${esc(o.op)}</option>`)
+      .join("")}</optgroup>`)
+    .join("");
+  return `<select data-on:change="$edit = evt.target.value; @post('/set-op?path=${p(path)}')"
+    class="${INPUT_BASE} text-amber-300">${body}</select>`;
+}
+
+/** Head dropdown for arithmetic / concat nodes (no reshaping needed). */
+function headSelect(current: string, path: Path, dialect: string): string {
+  const ops = ["+", "-", "*", "/", "%", "||", ...(dialect === "duckdb" ? ["//"] : [])];
+  if (!ops.includes(current)) ops.unshift(current);
+  return `<select data-on:change="$edit = evt.target.value; @post('/set-head?path=${p(path)}')"
+    class="${INPUT_BASE} text-amber-300">${ops
+      .map((o) => `<option value="${esc(o)}" ${o === current ? "selected" : ""}>${esc(o)}</option>`)
+      .join("")}</select>`;
+}
+
+const ARITH = new Set(["+", "-", "*", "/", "%", "||", "//", "^", "&", "|", "<<", ">>"]);
+
+// ============================================================================
+// renderExpr — the recursive expression editor
+// ============================================================================
+
+interface Ctx { env: Env; dialect: string; doc: SqlClause }
+
+const isPlainObject = (x: unknown): x is Record<string, unknown> =>
+  typeof x === "object" && x !== null && !Array.isArray(x);
+
+const isSubquery = (x: unknown): boolean =>
+  isPlainObject(x) && ("select" in x || "from" in x || "union" in x || "union-all" in x);
+
+function scalarText(v: unknown): string | null {
+  if (v === null) return "null";
+  const t = typeof v;
+  return t === "string" || t === "number" || t === "boolean" ? String(v) : null;
+}
+
+export function renderExpr(expr: SqlExpr, path: Path, ctx: Ctx): string {
+  // ---- scalars -------------------------------------------------------------
+  if (expr === null) return kw("NULL");
+  if (typeof expr === "string") {
+    if (expr === "*") return `<span class="font-mono text-sm text-violet-300">*</span>`;
+    if (expr.startsWith("%")) {
+      return `<span class="font-mono text-xs text-amber-200">${esc(expr.slice(1).toUpperCase())}()</span>`;
+    }
+    return slot(expr, path, "ident", "text-sky-300");
+  }
+  if (typeof expr === "number" || typeof expr === "boolean") {
+    return slot(String(expr), path, "lit", "text-teal-300");
+  }
+
+  // ---- special objects -----------------------------------------------------
+  if (isPlainObject(expr)) {
+    if ("ident" in expr && Array.isArray(expr.ident)) {
+      return slot((expr.ident as string[]).join("."), path, "ident", "text-sky-300");
+    }
+    if ("$" in expr) {
+      const s = scalarText((expr as { $: unknown }).$);
+      if (s !== null) return slot(s, path, "param", "text-emerald-300");
+    }
+    if ("v" in expr) {
+      const s = scalarText((expr as { v: unknown }).v);
+      if (s !== null) return slot(s, path, "lit", "text-teal-300");
+    }
+    if ("__raw" in expr || "raw" in expr) {
+      return chip(`<span class="text-slate-400">${esc(exprSql(expr, ctx.dialect))}</span>`, null);
+    }
+    if (isSubquery(expr)) {
+      const sql = exprSql(expr, ctx.dialect);
+      return chip(`<span class="text-slate-400">(${esc(sql.length > 60 ? sql.slice(0, 57) + "…" : sql)})</span>`, null);
+    }
+    return chip(esc(exprSql(expr, ctx.dialect)), null);
+  }
+
+  // ---- arrays --------------------------------------------------------------
+  if (Array.isArray(expr) && expr.length > 0) {
+    const head = expr[0];
+    if (typeof head === "string") {
+      const h = head.toLowerCase();
+
+      if (h === "and" || h === "or") return renderGroup(expr, path, ctx);
+
+      if (h === "not" && expr.length === 2) {
+        return `${kwButton("NOT", path, "Remove NOT")} ${renderExpr(expr[1] as SqlExpr, [...path, 1], ctx)}`;
+      }
+
+      if (h === "lambda" && expr.length === 3) {
+        return `<span class="font-mono text-xs text-fuchsia-300">${esc(String(expr[1]))}</span> ${punct("->")}
+          ${renderExpr(expr[2] as SqlExpr, [...path, 2], ctx)}`;
+      }
+
+      if (h === "cast" && expr.length === 3) {
+        return `${renderExpr(expr[1] as SqlExpr, [...path, 1], ctx)}${punct("::")}${
+          slot(String(expr[2]), [...path, 2], "ident", "text-orange-300")}`;
+      }
+
+      if (h === "at" && expr.length === 3) {
+        return `${renderExpr(expr[1] as SqlExpr, [...path, 1], ctx)}${punct("[")}${
+          renderExpr(expr[2] as SqlExpr, [...path, 2], ctx)}${punct("]")}`;
+      }
+
+      if (h === "over" && expr.length >= 3) {
+        const spec = exprSql(expr as SqlExpr, ctx.dialect).replace(/^.*?OVER\s*/i, "OVER ");
+        return `${renderExpr(expr[1] as SqlExpr, [...path, 1], ctx)}
+          ${chip(`<span class="text-slate-400">${esc(spec)}</span>`, null)}`;
+      }
+
+      if (h === "case") return renderCase(expr, path, ctx);
+
+      if (h === "star") return renderStar(expr, path, ctx);
+
+      if (h === "%exists" && expr.length === 2) {
+        return `${kw("EXISTS")} ${renderExpr(expr[1] as SqlExpr, [...path, 1], ctx)}`;
+      }
+
+      if (head.startsWith("%")) return renderCall(expr, path, ctx);
+
+      if (ARITH.has(head) && expr.length === 3) {
+        return `${renderExpr(expr[1] as SqlExpr, [...path, 1], ctx)}
+          ${headSelect(head, path, ctx.dialect)}
+          ${renderExpr(expr[2] as SqlExpr, [...path, 2], ctx)}`;
+      }
+
+      // Operator application — the granular predicate row.
+      if (expr.length >= 2) return renderPredicate(expr, path, ctx);
+    }
+  }
+
+  return chip(esc(exprSql(expr, ctx.dialect)), null);
+}
+
+/** A keyword rendered as a button (click posts /unwrap to strip the wrapper). */
+const kwButton = (label: string, path: Path, title: string) => `
+  <button data-on:click="@post('/unwrap?path=${p(path)}')" title="${title}"
+    class="rounded-md bg-violet-500/20 px-1.5 py-0.5 font-mono text-[10px] font-bold tracking-wider text-violet-300 hover:brightness-125">${label}</button>`;
+
+function renderPredicate(expr: SqlExpr[], path: Path, ctx: Ctx): string {
+  const op = String(expr[0]);
+  const lhs = expr[1] as SqlExpr;
+  const ops = opsForLhs(lhs, ctx.doc, ctx.env);
+  const parts = [renderExpr(lhs, [...path, 1], ctx), opSelect(op, ops, path)];
+
+  // The operator's own table entry decides the value shape — never guess
+  // from the data (an arithmetic RHS is also an array).
+  const opLower = op.toLowerCase();
+  const shape = ops.find((o) => o.op === op)?.valueType;
+  if (opLower === "is" || opLower === "is-not") {
+    parts.push(kw("NULL"));
+  } else if (expr.length === 4) {
+    // range: x BETWEEN lo AND hi
+    parts.push(renderExpr(expr[2] as SqlExpr, [...path, 2], ctx));
+    parts.push(kw("AND"));
+    parts.push(renderExpr(expr[3] as SqlExpr, [...path, 3], ctx));
+  } else if (shape === "list" && Array.isArray(expr[2])) {
+    // list: x IN (a, b, c) — an array of values, not an operator application
+    const items = expr[2] as SqlExpr[];
+    parts.push(punct("("));
+    items.forEach((item, i) => {
+      if (i > 0) parts.push(punct(","));
+      parts.push(renderExpr(item, [...path, 2, i], ctx));
+    });
+    parts.push(`<button data-on:click="@post('/add-item?path=${p([...path, 2])}')" title="Add value"
+      class="rounded-md border border-slate-700 px-1.5 py-0.5 text-[10px] font-semibold text-slate-400 hover:bg-slate-700 hover:text-slate-200">+</button>`);
+    parts.push(punct(")"));
+  } else if (expr.length >= 3) {
+    parts.push(renderExpr(expr[2] as SqlExpr, [...path, 2], ctx));
+  }
+
+  return `<span class="inline-flex flex-wrap items-center gap-1.5">${parts.join(" ")}</span>`;
+}
+
+function renderCall(expr: SqlExpr[], path: Path, ctx: Ctx): string {
+  const name = String(expr[0]).slice(1);
+  const parts: string[] = [
+    slot(name, [...path, 0], "fn", "text-amber-200"),
+    punct("("),
+  ];
+  expr.slice(1).forEach((arg, i) => {
+    if (i > 0) parts.push(punct(","));
+    parts.push(renderExpr(arg as SqlExpr, [...path, i + 1], ctx));
+  });
+  parts.push(punct(")"));
+  return `<span class="inline-flex flex-wrap items-center gap-1">${parts.join("")}</span>`;
+}
+
+function renderCase(expr: SqlExpr[], path: Path, ctx: Ctx): string {
+  const parts: string[] = [kw("CASE")];
+  for (let i = 1; i < expr.length; i += 2) {
+    if (String(expr[i]).toLowerCase() === "else") {
+      parts.push(kw("ELSE"), renderExpr(expr[i + 1] as SqlExpr, [...path, i + 1], ctx));
+    } else {
+      parts.push(kw("WHEN"), renderExpr(expr[i] as SqlExpr, [...path, i], ctx));
+      parts.push(kw("THEN"), renderExpr(expr[i + 1] as SqlExpr, [...path, i + 1], ctx));
+    }
+  }
+  parts.push(kw("END"));
+  return `<span class="inline-flex flex-wrap items-center gap-1.5">${parts.join(" ")}</span>`;
+}
+
+function renderStar(expr: SqlExpr[], path: Path, ctx: Ctx): string {
+  const mods = (expr[1] ?? {}) as { exclude?: string[]; replace?: [SqlExpr, string][] };
+  const parts: string[] = [`<span class="font-mono text-sm text-violet-300">*</span>`];
+  if (mods.exclude?.length) {
+    parts.push(kw("EXCLUDE"), punct("("));
+    mods.exclude.forEach((col, i) => {
+      if (i > 0) parts.push(punct(","));
+      parts.push(slot(String(col), [...path, 1, "exclude", i], "ident", "text-sky-300"));
+    });
+    parts.push(punct(")"));
+  }
+  if (mods.replace?.length) {
+    parts.push(kw("REPLACE"), punct("("));
+    mods.replace.forEach(([e, name], i) => {
+      if (i > 0) parts.push(punct(","));
+      parts.push(renderExpr(e, [...path, 1, "replace", i, 0], ctx));
+      parts.push(kw("AS"), slot(String(name), [...path, 1, "replace", i, 1], "ident", "text-sky-300"));
+    });
+    parts.push(punct(")"));
+  }
+  return `<span class="inline-flex flex-wrap items-center gap-1.5">${parts.join(" ")}</span>`;
+}
+
+/** [expr, alias] in select position → expr AS alias, both editable. */
+function renderSelectItem(item: SqlExpr, path: Path, ctx: Ctx): string {
+  if (
+    Array.isArray(item) && item.length === 2 &&
+    typeof item[1] === "string" && !item[1].startsWith("%") &&
+    !(typeof item[0] === "string" && item[0].startsWith("%")) &&
+    !(typeof item[0] === "string" && ARITH.has(item[0]))
+  ) {
+    return `${renderExpr(item[0] as SqlExpr, [...path, 0], ctx)} ${kw("AS")} ${
+      slot(String(item[1]), [...path, 1], "ident", "text-sky-300")}`;
+  }
+  return renderExpr(item, path, ctx);
+}
+
 // ============================================================================
 // WHERE tree
 // ============================================================================
 
-/** Binary single-value operators offered in the dropdown. */
-function opChoices(env: Env): string[] {
-  const seen = new Set<string>();
-  for (const t of ["text", "integer", "timestamp"]) {
-    for (const op of env.operatorsFor(t)) {
-      if (op.valueType === "single") seen.add(op.op);
-    }
-  }
-  return [...seen];
-}
-
-/** A leaf row is editable when it's [op, columnish, simple-value]. */
-function leafParts(expr: SqlExpr): { op: string; col: string; val: string } | null {
-  if (!Array.isArray(expr) || expr.length !== 3 || typeof expr[0] !== "string") return null;
-  const [op, colNode, valNode] = expr;
-  if (op.toLowerCase() === "and" || op.toLowerCase() === "or") return null;
-
-  let col: string | null = null;
-  if (typeof colNode === "string" && !colNode.startsWith("%")) col = colNode;
-  else if (colNode && typeof colNode === "object" && "ident" in colNode) {
-    col = (colNode as { ident: string[] }).ident.join(".");
-  }
-  if (col === null) return null;
-
-  let val: string | null = null;
-  if (valNode === null) val = "null";
-  else if (typeof valNode === "object" && valNode !== null && !Array.isArray(valNode)) {
-    if ("$" in valNode) val = String((valNode as { $: unknown }).$);
-    else if ("v" in valNode) val = String((valNode as { v: unknown }).v);
-  } else if (typeof valNode === "number" || typeof valNode === "boolean") {
-    val = String(valNode);
-  }
-  if (val === null) return null;
-
-  return { op, col, val };
-}
-
-function renderLeaf(expr: SqlExpr, path: Path, env: Env, dialect: string): string {
-  const parts = leafParts(expr);
-  if (!parts) {
-    // Complex expression — honest fallback: show its SQL, allow removal.
-    return `<div class="flex items-center">${chip(esc(exprSql(expr, dialect)), path)}</div>`;
-  }
-  const ops = opChoices(env);
-  if (!ops.includes(parts.op)) ops.unshift(parts.op);
+function renderGroup(expr: SqlExpr[], path: Path, ctx: Ctx): string {
+  const head = String(expr[0]).toLowerCase();
+  const children = expr.slice(1).map((child, i) =>
+    `<div class="flex items-start gap-2">
+       ${renderWhereNode(child as SqlExpr, [...path, i + 1], ctx)}
+     </div>`
+  );
   return `
-  <div class="flex flex-wrap items-center gap-1.5">
-    <input value="${esc(parts.col)}" spellcheck="false"
-      data-on:change="$edit = evt.target.value; @post('/set?path=${p(path)}&slot=col')"
-      class="w-36 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 font-mono text-xs text-sky-300 outline-none focus:border-sky-500"/>
-    <select data-on:change="$edit = evt.target.value; @post('/set?path=${p(path)}&slot=op')"
-      class="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 font-mono text-xs text-amber-300 outline-none focus:border-sky-500">
-      ${ops.map((o) => `<option value="${esc(o)}" ${o === parts.op ? "selected" : ""}>${esc(o)}</option>`).join("")}
-    </select>
-    <input value="${esc(parts.val)}" spellcheck="false"
-      data-on:change="$edit = evt.target.value; @post('/set?path=${p(path)}&slot=value')"
-      class="w-36 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 font-mono text-xs text-emerald-300 outline-none focus:border-sky-500"/>
-    ${removeBtn(path)}
+  <div class="w-full rounded-xl border border-slate-700/70 bg-slate-800/40 p-2.5 space-y-2">
+    <div class="flex items-center gap-2">
+      <button data-on:click="@post('/toggle?path=${p(path)}')"
+        class="rounded-md ${head === "and" ? "bg-sky-500/20 text-sky-300" : "bg-fuchsia-500/20 text-fuchsia-300"} px-2 py-0.5 font-mono text-[10px] font-bold tracking-widest hover:brightness-125"
+        title="Toggle AND / OR">${head.toUpperCase()}</button>
+      <div class="h-px flex-1 bg-slate-700/60"></div>
+      <button data-on:click="@post('/add?path=${p(path)}')"
+        class="rounded-md px-1.5 py-0.5 text-[10px] font-semibold text-slate-400 hover:bg-slate-700 hover:text-slate-200">+ condition</button>
+    </div>
+    ${children.join("")}
   </div>`;
 }
 
-function renderWhereNode(expr: SqlExpr, path: Path, env: Env, dialect: string): string {
+function renderWhereNode(expr: SqlExpr, path: Path, ctx: Ctx): string {
   if (Array.isArray(expr) && typeof expr[0] === "string") {
-    const head = expr[0].toLowerCase();
-    if (head === "and" || head === "or") {
-      const children = expr.slice(1).map((child, i) =>
-        `<div class="flex items-start gap-2">
-           ${renderWhereNode(child as SqlExpr, [...path, i + 1], env, dialect)}
-         </div>`
-      );
-      return `
-      <div class="rounded-xl border border-slate-700/70 bg-slate-800/40 p-2.5 space-y-2">
-        <div class="flex items-center gap-2">
-          <button data-on:click="@post('/toggle?path=${p(path)}')"
-            class="rounded-md ${head === "and" ? "bg-sky-500/20 text-sky-300" : "bg-fuchsia-500/20 text-fuchsia-300"} px-2 py-0.5 font-mono text-[10px] font-bold tracking-widest hover:brightness-125"
-            title="Toggle AND / OR">${head.toUpperCase()}</button>
-          <div class="h-px flex-1 bg-slate-700/60"></div>
-          <button data-on:click="@post('/add?path=${p(path)}')"
-            class="rounded-md px-1.5 py-0.5 text-[10px] font-semibold text-slate-400 hover:bg-slate-700 hover:text-slate-200">+ condition</button>
-        </div>
-        ${children.join("")}
-      </div>`;
-    }
+    const head = String(expr[0]).toLowerCase();
+    if (head === "and" || head === "or") return renderGroup(expr as SqlExpr[], path, ctx);
   }
-  return renderLeaf(expr, path, env, dialect);
+  return `<div class="flex flex-wrap items-center gap-1.5">${renderExpr(expr, path, ctx)}${removeBtn(path)}</div>`;
 }
 
 // ============================================================================
 // The builder panel
 // ============================================================================
 
-export function renderBuilder(doc: SqlClause | null, dialect: string): string {
+export function renderBuilder(doc: SqlClause | null, dialect: string, env: Env): string {
   if (!doc) {
     return `<div id="builder" class="grid place-items-center rounded-2xl border border-dashed border-slate-700 p-10 text-sm text-slate-500">
       Paste a query and hit <span class="mx-1 font-semibold text-slate-300">Parse</span> to build.
     </div>`;
   }
-  const env = createEnv({ dialect: dialect as never });
+  const ctx: Ctx = { env, dialect, doc };
   const out: string[] = [];
 
   // SELECT ------------------------------------------------------------------
@@ -172,7 +399,10 @@ export function renderBuilder(doc: SqlClause | null, dialect: string): string {
   <div>
     ${sectionLabel("Select")}
     <div class="flex flex-wrap items-center gap-1.5">
-      ${selectItems.map((item, i) => chip(esc(itemSql(item as SqlExpr, dialect)), ["select", i])).join("")}
+      ${selectItems.map((item, i) => `
+        <span class="inline-flex flex-wrap items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/60 px-2 py-1">
+          ${renderSelectItem(item as SqlExpr, ["select", i], ctx)}${removeBtn(["select", i])}
+        </span>`).join("")}
       <span class="inline-flex items-center gap-1">
         <input placeholder="add column…" data-bind:newcol spellcheck="false"
           data-on:keydown="evt.key === 'Enter' && @post('/add-select')"
@@ -185,20 +415,29 @@ export function renderBuilder(doc: SqlClause | null, dialect: string): string {
 
   // FROM + JOINs -------------------------------------------------------------
   const fromItems = doc.from === undefined ? [] : Array.isArray(doc.from) ? doc.from : [doc.from];
-  const joinRows: string[] = fromItems.map((f) =>
-    chip(`<span class="text-violet-300">FROM</span>&nbsp;${esc(itemSql(f as SqlExpr, dialect))}`, null)
-  );
+  const joinRows: string[] = fromItems.map((f) => {
+    const pair = Array.isArray(f) && f.length === 2 && typeof f[1] === "string";
+    const label = pair
+      ? `${esc(exprSql((f as SqlExpr[])[0] as SqlExpr, dialect))}&nbsp;<span class="text-slate-500">AS</span>&nbsp;${esc(String((f as SqlExpr[])[1]))}`
+      : esc(exprSql(f as SqlExpr, dialect));
+    return chip(`<span class="text-violet-300">FROM</span>&nbsp;${label}`, null);
+  });
   for (const key of ["join", "left-join", "right-join", "inner-join", "full-join",
     "asof-join", "semi-join", "anti-join", "positional-join"]) {
     const pairs = doc[key] as [SqlExpr, SqlExpr][] | undefined;
     if (!pairs) continue;
     pairs.forEach(([table, cond], i) => {
-      const kw = key === "join" ? "JOIN" : key.replace(/-/g, " ").toUpperCase();
-      joinRows.push(chip(
-        `<span class="text-violet-300">${kw}</span>&nbsp;${esc(itemSql(table, dialect))}` +
-        (cond ? `&nbsp;<span class="text-slate-500">ON</span>&nbsp;${esc(exprSql(cond, dialect))}` : ""),
-        [key, i]
-      ));
+      const kwText = key === "join" ? "JOIN" : key.replace(/-/g, " ").toUpperCase();
+      const tablePair = Array.isArray(table) && table.length === 2 && typeof table[1] === "string";
+      const tableLabel = tablePair
+        ? `${esc(exprSql((table as SqlExpr[])[0] as SqlExpr, dialect))} <span class="text-slate-500">AS</span> ${esc(String((table as SqlExpr[])[1]))}`
+        : esc(exprSql(table, dialect));
+      joinRows.push(`
+        <span class="inline-flex flex-wrap items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/60 px-2 py-1 font-mono text-xs">
+          <span class="text-violet-300">${kwText}</span> <span class="text-slate-200">${tableLabel}</span>
+          ${cond ? `<span class="text-slate-500">ON</span> ${renderExpr(cond, [key, i, 1], ctx)}` : ""}
+          ${removeBtn([key, i])}
+        </span>`);
     });
   }
   if (joinRows.length) {
@@ -214,39 +453,47 @@ export function renderBuilder(doc: SqlClause | null, dialect: string): string {
         class="rounded-md px-1.5 py-0.5 text-[10px] font-semibold text-slate-400 hover:bg-slate-700 hover:text-slate-200">+ filter</button>
     </div>
     ${doc.where !== undefined
-      ? renderWhereNode(doc.where as SqlExpr, ["where"], env, dialect)
+      ? renderWhereNode(doc.where as SqlExpr, ["where"], ctx)
       : `<div class="rounded-xl border border-dashed border-slate-700/70 p-3 text-center text-xs text-slate-600">no filters</div>`}
   </div>`);
 
+  // HAVING -------------------------------------------------------------------
+  if (doc.having !== undefined) {
+    out.push(`<div>${sectionLabel("Having")}${renderWhereNode(doc.having as SqlExpr, ["having"], ctx)}</div>`);
+  }
+
   // QUALIFY (duckdb) ---------------------------------------------------------
   if (doc.qualify !== undefined) {
-    out.push(`<div>${sectionLabel("Qualify")}<div class="flex flex-wrap gap-1.5">${
-      chip(esc(exprSql(doc.qualify as SqlExpr, dialect)), ["qualify"])
-    }</div></div>`);
+    out.push(`<div>${sectionLabel("Qualify")}${renderWhereNode(doc.qualify as SqlExpr, ["qualify"], ctx)}</div>`);
   }
 
   // GROUP BY -----------------------------------------------------------------
   const groupItems = doc["group-by"] === undefined ? [] : Array.isArray(doc["group-by"]) ? doc["group-by"] : [doc["group-by"]];
   if (groupItems.length) {
-    out.push(`<div>${sectionLabel("Group by")}<div class="flex flex-wrap gap-1.5">${
-      groupItems.map((g, i) => chip(esc(exprSql(g as SqlExpr, dialect)), ["group-by", i])).join("")
+    out.push(`<div>${sectionLabel("Group by")}<div class="flex flex-wrap items-center gap-1.5">${
+      groupItems.map((g, i) => `
+        <span class="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/60 px-2 py-1">
+          ${renderExpr(g as SqlExpr, ["group-by", i], ctx)}${removeBtn(["group-by", i])}
+        </span>`).join("")
     }</div></div>`);
   }
 
   // ORDER BY -----------------------------------------------------------------
   const orderItems = doc["order-by"] === undefined ? [] : Array.isArray(doc["order-by"]) ? doc["order-by"] : [doc["order-by"]];
   if (orderItems.length) {
-    out.push(`<div>${sectionLabel("Order by")}<div class="flex flex-wrap gap-1.5">${
+    out.push(`<div>${sectionLabel("Order by")}<div class="flex flex-wrap items-center gap-1.5">${
       orderItems.map((o, i) => {
         const isPair = Array.isArray(o) && o.length === 2 && (o[1] === "asc" || o[1] === "desc");
         const expr = isPair ? (o as SqlExpr[])[0] : o;
+        const exprPath: Path = isPair ? ["order-by", i, 0] : ["order-by", i];
         const dir = isPair ? String((o as SqlExpr[])[1]) : "asc";
-        return chip(
-          `${esc(exprSql(expr as SqlExpr, dialect))}
-           <button data-on:click="@post('/order-dir?path=${p(["order-by", i])}')"
-             class="rounded bg-slate-700/80 px-1.5 text-[10px] font-bold ${dir === "desc" ? "text-rose-300" : "text-emerald-300"} hover:brightness-125">${dir.toUpperCase()}</button>`,
-          ["order-by", i]
-        );
+        return `
+        <span class="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/60 px-2 py-1">
+          ${renderExpr(expr as SqlExpr, exprPath, ctx)}
+          <button data-on:click="@post('/order-dir?path=${p(["order-by", i])}')"
+            class="rounded bg-slate-700/80 px-1.5 text-[10px] font-bold ${dir === "desc" ? "text-rose-300" : "text-emerald-300"} hover:brightness-125">${dir.toUpperCase()}</button>
+          ${removeBtn(["order-by", i])}
+        </span>`;
       }).join("")
     }</div></div>`);
   }
@@ -275,11 +522,10 @@ export function renderBuilder(doc: SqlClause | null, dialect: string): string {
 // Output panel + status
 // ============================================================================
 
-export function renderOutput(doc: SqlClause | null, dialect: string): string {
+export function renderOutput(doc: SqlClause | null, dialect: string, env: Env): string {
   if (!doc) {
     return `<div id="output" class="rounded-2xl border border-slate-700/70 bg-slate-800/30 p-5 text-sm text-slate-600">SQL appears here.</div>`;
   }
-  const env = createEnv({ dialect: dialect as never });
   let pretty = "";
   let params: unknown[] = [];
   let error: string | null = null;

@@ -95,5 +95,47 @@ if (await removes.count()) {
 }
 await page.screenshot({ path: `${shots}/5-removed.png`, fullPage: true });
 
+// 7. Operator dropdown reshapes the node by arity (single → none → list → range)
+await page.click("text=nested logic");
+await page.waitForTimeout(600);
+const opSels = page.locator("#builder select[data-on\\:change*='set-op']");
+await opSels.nth(0).selectOption("is"); // status = 'a'  →  status IS NULL
+await page.waitForTimeout(600);
+let outOp = await page.textContent("#output");
+step("op → IS NULL (none arity)", /IS NULL/i.test(outOp), outOp.slice(0, 140).replace(/\s+/g, " "));
+
+await page.locator("#builder select[data-on\\:change*='set-op']").nth(0).selectOption("in");
+await page.waitForTimeout(600);
+await page.click("#builder button[title='Add value']");
+await page.waitForTimeout(600);
+outOp = await page.textContent("#output");
+step("op → IN + add item (list arity)", /IN \(/i.test(outOp), outOp.slice(0, 160).replace(/\s+/g, " "));
+
+await page.locator("#builder select[data-on\\:change*='set-op']").nth(1).selectOption("between");
+await page.waitForTimeout(600);
+outOp = await page.textContent("#output");
+step("op → BETWEEN (range arity)", /BETWEEN/i.test(outOp), outOp.slice(0, 160).replace(/\s+/g, " "));
+await page.screenshot({ path: `${shots}/6-reshaped.png`, fullPage: true });
+
+// 8. Edit a nested function argument in SELECT (sum(o.total) → sum(o.subtotal))
+await page.click("text=analytics join");
+await page.waitForTimeout(600);
+const builderInputs = page.locator("#builder input[data-on\\:change*='/edit']");
+const bn = await builderInputs.count();
+let argInput = null;
+for (let i = 0; i < bn; i++) {
+  if ((await builderInputs.nth(i).inputValue()) === "o.total") { argInput = builderInputs.nth(i); break; }
+}
+if (argInput) {
+  await argInput.fill("o.subtotal");
+  await argInput.dispatchEvent("change");
+  await page.waitForTimeout(600);
+  const outFn = await page.textContent("#output");
+  step("nested fn arg edit re-emits", outFn.includes("o.subtotal"), outFn.slice(0, 160).replace(/\s+/g, " "));
+} else {
+  step("nested fn arg edit re-emits", false, "no o.total input found");
+}
+await page.screenshot({ path: `${shots}/7-fn-arg-edit.png`, fullPage: true });
+
 step("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
 await browser.close();
