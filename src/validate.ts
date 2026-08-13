@@ -174,8 +174,32 @@ export function validateQuery(
     for (const col of t.columns) allColumns.push({ name: col.name, table: t.name });
   }
 
+  // Ancestor scopes for correlated-subquery resolution: the walk is
+  // parent-first and scope labels are hierarchical, so a stack of
+  // (scope, inferrer) pairs reconstructs the lexical chain.
+  const ancestry: Array<{ scope: string; infer: ReturnType<typeof createInferrer> }> = [];
+
   walkClauseTree(clause, (c, scope) => {
     const infer = createInferrer(schema, c, options);
+    while (
+      ancestry.length &&
+      !(scope !== ancestry[ancestry.length - 1]!.scope &&
+        scope.startsWith(ancestry[ancestry.length - 1]!.scope))
+    ) {
+      ancestry.pop();
+    }
+    const parents = ancestry.slice();
+    ancestry.push({ scope, infer });
+
+    /** Resolve in this scope, then walk outward — correlated refs are legal. */
+    const resolveCorrelated = (s: string): boolean => {
+      if (infer.resolveColumn(s)) return true;
+      for (let i = parents.length - 1; i >= 0; i--) {
+        if (parents[i]!.infer.resolveColumn(s)) return true;
+      }
+      return false;
+    };
+
     // Columns already reported unresolved in this scope — downstream checks
     // (GROUP BY completeness, types) skip them instead of cascading noise.
     const unresolved = new Set<string>();
@@ -225,7 +249,7 @@ export function validateQuery(
     const checkRef = (ref: SqlExpr, where: string) => {
       const s = identString(ref);
       if (s === null || s === "*" || s.endsWith(".*")) return;
-      if (infer.resolveColumn(s)) return;
+      if (resolveCorrelated(s)) return;
       unresolved.add(exprKey(ref));
       // Unresolvable — is the qualifier the problem, or the column?
       const dot = s.lastIndexOf(".");

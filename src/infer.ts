@@ -368,6 +368,7 @@ export function createInferrer(
 
       if (op === "over") return typeOf(expr[1] as SqlExpr);
       if (op === "agg-order-by") return typeOf(expr[1] as SqlExpr);
+      if (op === "within-group") return typeOf(expr[1] as SqlExpr);
       if (op === "filter") return typeOf(expr[1] as SqlExpr);
       if (op === "collate") return typeOf(expr[1] as SqlExpr);
       if (op === "field") return null; // struct member — schema doesn't know

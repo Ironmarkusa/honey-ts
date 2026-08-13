@@ -161,19 +161,48 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
       const callAny = call as unknown as {
         distinct?: string;
         filter?: Expr;
+        orderBy?: OrderByStatement[];
+        withinGroup?: OrderByStatement;
         over?: { partitionBy?: Expr[]; orderBy?: OrderByStatement[] };
       };
 
       // Use % prefix for function names (HoneySQL convention)
       let fnName = `%${call.function.name.toLowerCase()}`;
 
-      // Handle DISTINCT in aggregate: COUNT(DISTINCT x)
-      if (callAny.distinct) {
+      // Handle DISTINCT in aggregate: COUNT(DISTINCT x). The AST field is
+      // 'all' | 'distinct' — COUNT(ALL x) is the default behaviour, not
+      // DISTINCT, so it must not grow a -distinct suffix.
+      if (callAny.distinct === "distinct") {
         fnName = `%${call.function.name.toLowerCase()}-distinct`;
       }
 
       const args = call.args.map(exprToClause);
       let fnCall: SqlExpr[] = [fnName, ...args];
+
+      // An ORDER BY item inside an aggregate: an expr, or [expr, direction]
+      // where the direction may carry a NULLS placement ("desc",
+      // "asc nulls last", "nulls first", ...) — the shape agg-order-by and
+      // within-group emit.
+      const aggOrderItem = (o: OrderByStatement): SqlExpr => {
+        const item = exprToClause(o.by);
+        const dir = [
+          o.order?.toLowerCase(),
+          o.nulls ? `nulls ${o.nulls.toLowerCase()}` : undefined,
+        ].filter(Boolean).join(" ");
+        return dir ? ([item, dir] as SqlExpr) : item;
+      };
+
+      // Handle aggregate ORDER BY inside the parens:
+      // string_agg(x, ',' ORDER BY y)
+      if (callAny.orderBy && callAny.orderBy.length > 0) {
+        fnCall = ["agg-order-by", fnCall, callAny.orderBy.map(aggOrderItem)];
+      }
+
+      // Handle ordered-set aggregates:
+      // percentile_cont(0.5) WITHIN GROUP (ORDER BY total)
+      if (callAny.withinGroup) {
+        fnCall = ["within-group", fnCall, [aggOrderItem(callAny.withinGroup)]];
+      }
 
       // Handle FILTER clause: COUNT(*) FILTER (WHERE ...)
       if (callAny.filter) {

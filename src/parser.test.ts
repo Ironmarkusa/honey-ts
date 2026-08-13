@@ -172,6 +172,19 @@ describe("round-trip edge cases", () => {
     // FILTER clause on aggregate
     "SELECT COUNT(*) FILTER (WHERE status = 'active') as active_count FROM users",
 
+    // WITHIN GROUP (ordered-set aggregates)
+    "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total) FROM orders",
+    "SELECT PERCENTILE_DISC(0.9) WITHIN GROUP (ORDER BY total DESC) AS p90 FROM orders",
+    "SELECT MODE() WITHIN GROUP (ORDER BY status) FROM users",
+    "SELECT RANK(100) WITHIN GROUP (ORDER BY total) FROM orders",
+
+    // Aggregate ORDER BY inside the call
+    "SELECT STRING_AGG(name, ',' ORDER BY name) FROM users",
+    "SELECT ARRAY_AGG(id ORDER BY created_at DESC NULLS LAST) FROM users",
+    "SELECT ARRAY_AGG(id ORDER BY created_at NULLS FIRST) FROM users",
+    "SELECT ARRAY_AGG(DISTINCT id ORDER BY id) FROM users",
+    "SELECT STRING_AGG(name, ',' ORDER BY last_name, first_name DESC) FROM users",
+
     // LATERAL subquery
     "SELECT u.id FROM users u, LATERAL (SELECT * FROM orders WHERE user_id = u.id LIMIT 3) o",
 
@@ -202,6 +215,75 @@ describe("round-trip edge cases", () => {
       assert.strictEqual(normalizedOutput, normalizedInput);
     });
   }
+});
+
+describe("WITHIN GROUP and aggregate ORDER BY", () => {
+  // These constructs used to be silently DROPPED on parse — re-emitting gave
+  // PERCENTILE_CONT(0.5) with no ordering, which changes meaning. The clause
+  // shapes below pin the representation, not just normalized text.
+
+  it("parses WITHIN GROUP into a within-group node", () => {
+    const clause = fromSql(
+      "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY total) FROM t"
+    );
+    assert.deepStrictEqual(clause.select, [
+      ["within-group", ["%percentile_cont", { v: 0.5 }], ["total"]],
+    ]);
+  });
+
+  it("parses WITHIN GROUP with a direction", () => {
+    const clause = fromSql(
+      "SELECT percentile_disc(0.9) WITHIN GROUP (ORDER BY total DESC) FROM t"
+    );
+    assert.deepStrictEqual(clause.select, [
+      ["within-group", ["%percentile_disc", { v: 0.9 }], [["total", "desc"]]],
+    ]);
+  });
+
+  it("parses zero-argument ordered-set aggregates (mode)", () => {
+    const clause = fromSql("SELECT mode() WITHIN GROUP (ORDER BY x) FROM t");
+    assert.deepStrictEqual(clause.select, [["within-group", ["%mode"], ["x"]]]);
+  });
+
+  it("parses aggregate ORDER BY into an agg-order-by node", () => {
+    const clause = fromSql("SELECT string_agg(x, ',' ORDER BY y) FROM t");
+    assert.deepStrictEqual(clause.select, [
+      ["agg-order-by", ["%string_agg", "x", { v: "," }], ["y"]],
+    ]);
+  });
+
+  it("parses aggregate ORDER BY with direction and NULLS placement", () => {
+    const clause = fromSql(
+      "SELECT array_agg(x ORDER BY y DESC NULLS LAST) FROM t"
+    );
+    assert.deepStrictEqual(clause.select, [
+      ["agg-order-by", ["%array_agg", "x"], [["y", "desc nulls last"]]],
+    ]);
+  });
+
+  it("parses DISTINCT with aggregate ORDER BY", () => {
+    const clause = fromSql("SELECT array_agg(DISTINCT x ORDER BY x) FROM t");
+    assert.deepStrictEqual(clause.select, [
+      ["agg-order-by", ["%array_agg-distinct", "x"], ["x"]],
+    ]);
+  });
+
+  it("does not turn COUNT(ALL x) into COUNT(DISTINCT x)", () => {
+    // ALL is the default aggregate behaviour — the opposite of DISTINCT.
+    const clause = fromSql("SELECT count(ALL x) FROM t");
+    assert.deepStrictEqual(clause.select, [["%count", "x"]]);
+  });
+
+  it("keeps WITHIN GROUP when re-emitting", () => {
+    const clause = fromSql(
+      "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY total) FROM t"
+    );
+    const [sql] = toSql(clause, { inline: true });
+    assert.strictEqual(
+      sql,
+      "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total) FROM t"
+    );
+  });
 });
 
 describe("quoted identifiers with spaces", () => {

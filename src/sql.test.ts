@@ -584,3 +584,71 @@ describe("Literal values", () => {
     assert.deepStrictEqual(params, ["Alice"]);
   });
 });
+
+describe("within-group", () => {
+  it("emits WITHIN GROUP (ORDER BY ...)", () => {
+    const [sql, ...params] = format({
+      select: [["within-group", ["%percentile_cont", { $: 0.5 }], ["total"]]],
+      from: "orders",
+    });
+    assert.strictEqual(
+      sql,
+      "SELECT PERCENTILE_CONT($1) WITHIN GROUP (ORDER BY total) FROM orders"
+    );
+    assert.deepStrictEqual(params, [0.5]);
+  });
+
+  it("emits multiple ORDER BY items with directions", () => {
+    const [sql] = format({
+      select: [
+        ["within-group", ["%rank", { v: 1 }, { v: 2 }], [["a", "desc"], "b"]],
+      ],
+      from: "t",
+    });
+    assert.strictEqual(
+      sql,
+      "SELECT RANK(1, 2) WITHIN GROUP (ORDER BY a DESC, b) FROM t"
+    );
+  });
+
+  it("composes with FILTER and an alias", () => {
+    const [sql] = format({
+      select: [[
+        ["filter",
+          ["within-group", ["%mode"], ["x"]],
+          [">", "y", { v: 1 }]],
+        "m",
+      ]],
+      from: "t",
+    });
+    assert.strictEqual(
+      sql,
+      "SELECT MODE() WITHIN GROUP (ORDER BY x) FILTER (WHERE y > 1) AS m FROM t"
+    );
+  });
+
+  it("emits on the duckdb dialect", () => {
+    const [sql] = format(
+      {
+        select: [["within-group", ["%percentile_cont", { v: 0.5 }], ["total"]]],
+        from: "orders",
+      },
+      { dialect: "duckdb" }
+    );
+    assert.strictEqual(
+      sql,
+      "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total) FROM orders"
+    );
+  });
+
+  it("emits a bare NULLS placement without inventing a direction", () => {
+    const [sql] = format({
+      select: [["agg-order-by", ["%array_agg", "x"], [["y", "nulls first"]]]],
+      from: "t",
+    });
+    assert.strictEqual(
+      sql,
+      "SELECT ARRAY_AGG(x ORDER BY y NULLS FIRST) FROM t"
+    );
+  });
+});

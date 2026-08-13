@@ -850,6 +850,32 @@ function rawRender(s: string | (string | SqlExpr)[], ctx: FormatContext): Format
 
 type SpecialSyntaxFn = (k: string, args: SqlExpr[], ctx: FormatContext) => FormatResult;
 
+/**
+ * Format the ORDER BY items of an aggregate (agg-order-by, within-group).
+ *
+ * Each item is either an expression or [expr, direction] where the direction
+ * may carry a NULLS placement: "desc", "asc nulls last", "nulls first", ...
+ */
+function formatAggOrderItems(
+  orderBy: unknown,
+  ctx: FormatContext
+): [sqls: string[], params: unknown[]] {
+  const params: unknown[] = [];
+  const items = Array.isArray(orderBy) ? orderBy : [orderBy];
+  const sqls = items.map((item) => {
+    if (Array.isArray(item) && item.length === 2 && typeof item[1] === "string" &&
+        /^((asc|desc)(\s+nulls\s+(first|last))?|nulls\s+(first|last))$/i.test(item[1])) {
+      const [sql, ...p] = formatExpr(item[0] as SqlExpr, ctx);
+      params.push(...p);
+      return `${sql} ${item[1].toUpperCase()}`;
+    }
+    const [sql, ...p] = formatExpr(item as SqlExpr, ctx);
+    params.push(...p);
+    return sql;
+  });
+  return [sqls, params];
+}
+
 const specialSyntax = new Map<string, SpecialSyntaxFn>([
   // CASE expression
   ["case", (k, args, ctx) => {
@@ -982,8 +1008,6 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
   // Stored as ["agg-order-by", <fn call>, [<order by items>]] so the ORDER BY
   // survives as data rather than as text inside the call.
   ["agg-order-by", (k, [call, orderBy], ctx) => {
-    const params: unknown[] = [];
-
     if (!Array.isArray(call) || typeof call[0] !== "string") {
       throw new Error("agg-order-by expects a function call as its first argument");
     }
@@ -995,25 +1019,27 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
       distinct = "DISTINCT ";
     }
     const [argSqls, argParams] = formatExprList(call.slice(1) as SqlExpr[], ctx);
-    params.push(...argParams);
-
-    const items = Array.isArray(orderBy) ? orderBy : [orderBy];
-    const orderSqls = items.map((item) => {
-      // Each item is either an expression or [expr, direction] where the
-      // direction may carry a NULLS placement: "desc", "asc nulls last", ...
-      if (Array.isArray(item) && item.length === 2 && typeof item[1] === "string" &&
-          /^(asc|desc)(\s+nulls\s+(first|last))?$/i.test(item[1])) {
-        const [sql, ...p] = formatExpr(item[0] as SqlExpr, ctx);
-        params.push(...p);
-        return `${sql} ${item[1].toUpperCase()}`;
-      }
-      const [sql, ...p] = formatExpr(item as SqlExpr, ctx);
-      params.push(...p);
-      return sql;
-    });
+    const [orderSqls, orderParams] = formatAggOrderItems(orderBy, ctx);
 
     const args = argSqls.length ? `${argSqls.join(", ")} ` : "";
-    return [`${fnName}(${distinct}${args}ORDER BY ${orderSqls.join(", ")})`, ...params];
+    return [
+      `${fnName}(${distinct}${args}ORDER BY ${orderSqls.join(", ")})`,
+      ...argParams,
+      ...orderParams,
+    ];
+  }],
+
+  // Ordered-set aggregate: percentile_cont(0.5) WITHIN GROUP (ORDER BY total).
+  // Stored as ["within-group", <fn call>, [<order by items>]] so the ORDER BY
+  // survives as data, mirroring agg-order-by. Valid in both dialects.
+  ["within-group", (k, [call, orderBy], ctx) => {
+    const [fnSql, ...fnParams] = formatExpr(call!, ctx);
+    const [orderSqls, orderParams] = formatAggOrderItems(orderBy, ctx);
+    return [
+      `${fnSql} WITHIN GROUP (ORDER BY ${orderSqls.join(", ")})`,
+      ...fnParams,
+      ...orderParams,
+    ];
   }],
 
   // COLLATE: ["collate", expr, "NOCASE"] -> expr COLLATE NOCASE.
@@ -1403,7 +1429,7 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
  */
 const specialSyntaxMinTwoArgs = new Set<string>([
   "at", "slice", "named-arg", "cast", "try-cast", "between", "not-between",
-  "agg-order-by", "lambda", "in", "not-in", "over",
+  "agg-order-by", "within-group", "lambda", "in", "not-in", "over",
 ]);
 
 const clauseFormatters = new Map<string, ClauseFormatter>();

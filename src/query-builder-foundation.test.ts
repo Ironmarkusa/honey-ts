@@ -211,6 +211,24 @@ describe("validateQuery", () => {
     const p = result.problems.find((x) => x.code === "unknown-column")!;
     assert.match(p.scope, /where/);
   });
+
+  test("correlated subqueries resolve outer aliases", () => {
+    const result = validateQuery(
+      fromSql("SELECT u.email FROM users u WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)"),
+      SCHEMA
+    );
+    const unknown = result.problems.filter((x) => x.code === "unknown-column");
+    assert.deepEqual(unknown, [], JSON.stringify(unknown));
+  });
+
+  test("correlated resolution still catches real typos in the inner scope", () => {
+    const result = validateQuery(
+      fromSql("SELECT u.email FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_idz = u.id)"),
+      SCHEMA
+    );
+    const p = result.problems.find((x) => x.code === "unknown-column")!;
+    assert.match(p.message, /user_idz/);
+  });
 });
 
 // ===========================================================================
