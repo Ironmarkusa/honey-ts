@@ -233,6 +233,45 @@ DUCKDB_FUNCTIONS_BY_NAME.get('date_trunc');
 //   args: [{ name: 'part', type: 'VARCHAR' }, ...], overloads: [...] }
 ```
 
+## Query-Builder Foundation
+
+Four subsystems for building schema-aware query UIs on top of the clause map:
+
+```typescript
+import {
+  schemaFromDuckDb, createInferrer, validateQuery, paths, matchers,
+} from 'honey-ts';
+
+// 1. Introspect a live database (driver-agnostic — you pass the executor)
+const schema = await schemaFromDuckDb(async (sql) =>
+  (await conn.run(sql)).getRowObjectsJson()
+);
+// tables, columns, types, nullability, PKs, FK references
+
+// 2. Infer the type of ANY expression — including computed columns
+const infer = createInferrer(schema, clause, { dialect: 'duckdb' });
+infer.typeOf(["%sum", "o.total"]);           // { type: "numeric(10,2)", nullable: true }
+infer.typeOf(["%date_trunc", {v:"month"}, "o.placed_at"]); // { type: "timestamp", ... }
+
+// 3. Validate with UI-ready errors: codes, scopes, did-you-mean hints
+validateQuery(fromSql("SELECT emial FROM users"), schema);
+// { valid: false, problems: [{ severity: "error", code: "unknown-column",
+//     scope: "root.select", message: 'Column "emial" cannot be resolved...',
+//     hint: 'Did you mean "email"?' }] }
+// Also: unknown tables, GROUP BY completeness, aggregates in WHERE,
+// nested aggregates, comparison type mismatches, ORDER BY ordinal range.
+
+// 4. Address any node stably — the "user clicked THIS predicate" primitive
+const [hit] = paths.findPaths(clause, matchers.op(">"));
+clause = paths.setAt(clause, hit.path, [">", "total", $(50)]);  // immutable
+clause = paths.removeAt(clause, hit.path);  // heals two-arm AND/OR on removal
+```
+
+Together with parsing, manipulation, and the guard, this closes the loop a
+query-builder product runs on: **introspect → build (UI / SQL text / LLM) →
+infer types → validate → edit by address → emit → execute** — with every
+query a serializable JSON document along the way.
+
 ## Syntax Reference
 
 ### Identifiers and Values

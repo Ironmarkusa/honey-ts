@@ -88,6 +88,23 @@ export type {
 } from "./analyze.js";
 
 // ============================================================================
+// 4b. Query-builder foundation — schema loading, type inference, deep
+//     validation, and stable node addressing for UIs
+// ============================================================================
+
+export { schemaFromPostgres, schemaFromDuckDb } from "./schema-loaders.js";
+export type { SchemaExecutor, SchemaLoadOptions } from "./schema-loaders.js";
+
+export { createInferrer, normalizeType, baseType, typesComparable } from "./infer.js";
+export type { Inferrer, InferredType, InferrerOptions } from "./infer.js";
+
+export { validateQuery } from "./validate.js";
+export type { Problem, ProblemSeverity, ValidationOutcome, ValidateOptions } from "./validate.js";
+
+export * as paths from "./paths.js";
+export type { Path, PathStep, PathHit } from "./paths.js";
+
+// ============================================================================
 // 5. Guard — allow-list validation for LLM-generated SQL
 // ============================================================================
 
