@@ -43,6 +43,7 @@ export const SENTINEL = {
   isDistinct: "__honey_isdf",
   isNotDistinct: "__honey_isndf",
   setOp: "__honey_setop",
+  ident: "__honey_ident",
   having: "__honey_having",
   emptyGroup: "__honey_gs0",
   ignoreNulls: "__honey_ignore_nulls",
@@ -995,6 +996,14 @@ function rewriteIntervalUnit(sql: string): string {
       guard(offset) ? m : `INTERVAL '${n} ${unit.toUpperCase()}'`
   );
 
+  // Quoted-number form: INTERVAL '3' MONTH -> INTERVAL '3 MONTH'.
+  const guard2 = makeGuard(out);
+  out = out.replace(
+    /\bINTERVAL\s+'(\d+(?:\.\d+)?)'\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR|MILLISECOND|MICROSECOND)S?\b/gi,
+    (m, n: string, unit: string, offset: number) =>
+      guard2(offset) ? m : `INTERVAL '${n} ${unit.toUpperCase()}'`
+  );
+
   // Expression operand: INTERVAL (expr) UNIT.
   for (let pass = 0; pass < 20; pass++) {
     const g = makeGuard(out);
@@ -1011,6 +1020,74 @@ function rewriteIntervalUnit(sql: string): string {
       `(${expr}) * INTERVAL '1 ${unitM[1]!.toUpperCase()}'` +
       out.slice(close + 1 + unitM[0].length);
   }
+  return out;
+}
+
+/** One identifier segment: bare word or quoted (with "" escapes). */
+const IDENT_SEGMENT = String.raw`(?:[A-Za-z_]\w*|"(?:[^"]|"")+")`;
+
+/**
+ * Multi-part names beyond pgsql-ast-parser's caps — 3+ parts in table
+ * position (`FROM db.schema.t`, `INSERT INTO db.schema.t`), 4+ parts in
+ * expression position (`db.schema.t.col`). Table position folds bare chains
+ * into one quoted identifier (honey re-splits dotted names on emit);
+ * expression position uses an `__honey_ident(...)` call revived to
+ * `{ident: [...]}`, which formats as the original dotted path.
+ */
+function rewriteMultiPartNames(sql: string): string {
+  let out = sql;
+
+  // Table position: FROM / JOIN / INTO / UPDATE followed by a 3+-part chain
+  // of BARE identifiers (quoted parts may contain dots; folding those would
+  // corrupt the name, so they are left alone).
+  for (let pass = 0; pass < 30; pass++) {
+    const guard = makeGuard(out);
+    const re = /\b(FROM|JOIN|INTO|UPDATE)\s+([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*){2,})(?![\w.("])/gi;
+    let m: RegExpExecArray | null;
+    let changed = false;
+    while ((m = re.exec(out)) !== null) {
+      if (guard(m.index)) continue;
+      const parts = m[2]!.split(".").map((p) => p.trim());
+      const start = m.index + m[1]!.length + (m[0].length - m[1]!.length - m[2]!.length);
+      out =
+        out.slice(0, start) +
+        `"${parts.join(".")}"` +
+        out.slice(start + m[2]!.length);
+      changed = true;
+      break;
+    }
+    if (!changed) break;
+  }
+
+  // Expression position: 4+-part chains anywhere (column paths through
+  // db.schema.table.col[.field...]).
+  for (let pass = 0; pass < 30; pass++) {
+    const guard = makeGuard(out);
+    const re = new RegExp(
+      String.raw`(^|[^\w".])(${IDENT_SEGMENT}(?:\s*\.\s*${IDENT_SEGMENT}){3,})(?![\w."(])`,
+      "g"
+    );
+    let m: RegExpExecArray | null;
+    let changed = false;
+    while ((m = re.exec(out)) !== null) {
+      const at = m.index + m[1]!.length;
+      if (guard(at)) continue;
+      const parts: string[] = [];
+      const segRe = new RegExp(IDENT_SEGMENT, "g");
+      let seg: RegExpExecArray | null;
+      while ((seg = segRe.exec(m[2]!)) !== null) {
+        parts.push(seg[0].startsWith('"') ? seg[0].slice(1, -1).replace(/""/g, '"') : seg[0]);
+      }
+      out =
+        out.slice(0, at) +
+        `${SENTINEL.ident}(${parts.map(q).join(", ")})` +
+        out.slice(at + m[2]!.length);
+      changed = true;
+      break;
+    }
+    if (!changed) break;
+  }
+
   return out;
 }
 
@@ -1908,7 +1985,9 @@ function rewriteEmptyGroupItems(sql: string): string {
   let out = sql;
   for (let pass = 0; pass < 20; pass++) {
     const guard = makeGuard(out);
-    const m = /\b(GROUP\s+BY\s|,\s*)\(\s*\)/gi.exec(out);
+    // No \b before the alternation: `cube (crs), ()` puts the comma right
+    // after `)`, and there is no word boundary between two punctuators.
+    const m = /(\bGROUP\s+BY\s|,\s*)\(\s*\)/gi.exec(out);
     if (!m || guard(m.index)) break;
     // Only inside a GROUP BY list: a GROUP BY keyword must precede at depth 0.
     if (m[1]!.startsWith(",")) {
@@ -1933,6 +2012,28 @@ function rewriteEmptyGroupItems(sql: string): string {
       out.slice(m.index + m[0].length);
   }
   return out;
+}
+
+/**
+ * Arithmetic glued to a typed literal's closing quote — `DATE'2021-01-01'-1`
+ * — trips pgsql-ast-parser's tokenizer; a space after the quote fixes it.
+ */
+function rewriteTypedLiteralArith(sql: string): string {
+  const spans = protectedSpans(sql).filter((s) => sql[s.start] === "'");
+  let out = "";
+  let cursor = 0;
+  for (const s of spans) {
+    out += sql.slice(cursor, s.end);
+    cursor = s.end;
+    // Space on both sides: `'...'-1` -> `'...' - 1` (pgsql treats `-1` glued
+    // to the operator position as a fresh literal and mis-tokenizes).
+    const m = /^([-+])(\d)/.exec(sql.slice(s.end));
+    if (m) {
+      out += ` ${m[1]} `;
+      cursor = s.end + 1;
+    }
+  }
+  return out + sql.slice(cursor);
 }
 
 /**
@@ -2217,6 +2318,8 @@ export function preprocessDuckDb(sql: string): string {
   out = rewriteMaterialized(out);
   out = rewriteCteColumnAliases(out);
   out = rewriteBareFromValues(out);
+  out = rewriteMultiPartNames(out);
+  out = rewriteTypedLiteralArith(out);
   out = rewriteTryCast(out);
   out = rewriteInsertModifiers(out);
   out = rewriteWindowClause(out);
@@ -2516,6 +2619,11 @@ export function reviveSentinels(value: unknown, ctx: ReviveContext = {}): unknow
 
         case SENTINEL.collate:
           return ["collate", revivedArgs[0]!, constString(revivedArgs[1])];
+
+        case SENTINEL.ident:
+          // Multi-part name beyond upstream's caps: {ident: [...]} formats as
+          // the original dotted path with each segment quoted independently.
+          return { ident: revivedArgs.map(constString) };
 
         case SENTINEL.isDistinct:
           return ["is-distinct-from", revivedArgs[0]!, revivedArgs[1]!];

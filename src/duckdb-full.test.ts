@@ -718,3 +718,47 @@ describe("set operations and grouping extras", () => {
     await roundTrips("SELECT l[1].x FROM t", `SELECT ("l"[1])."x" FROM "t"`);
   });
 });
+
+// ===========================================================================
+describe("multi-part names and literal edge cases", () => {
+  test("three-part table names", async () => {
+    await roundTrips(
+      "SELECT c FROM ddb.main.my_table",
+      `SELECT "c" FROM "ddb"."main"."my_table"`
+    );
+  });
+
+  test("three-part INSERT target", async () => {
+    await roundTrips("INSERT INTO db1.s1.t VALUES (42)");
+  });
+
+  test("four-part column paths", async () => {
+    await roundTrips(
+      "SELECT db1.s1.t.c FROM db1.s1.t",
+      `SELECT "db1"."s1"."t"."c" FROM "db1"."s1"."t"`
+    );
+  });
+
+  test("five-part struct-field path", async () => {
+    await roundTrips("SELECT database.schema.table.col.field FROM database.schema.table");
+  });
+
+  test("INTERVAL 'n' UNIT quoted-number form", async () => {
+    await roundTrips(
+      "SELECT interval '3' month",
+      "SELECT CAST('3 MONTH' AS INTERVAL)"
+    );
+  });
+
+  test("arithmetic glued to typed literals", async () => {
+    await roundTrips("SELECT DATE'2021-02-09'-1, DATE'2021-02-09'+1");
+  });
+
+  test("empty grouping items after CUBE", async () => {
+    await roundTrips("SELECT type, count(*) FROM t GROUP BY cube (crs), (), type");
+  });
+
+  test("CUBE nested in GROUPING SETS", async () => {
+    await roundTrips("SELECT c FROM t GROUP BY GROUPING SETS (cube (crs)), (), tp");
+  });
+});

@@ -414,7 +414,7 @@ constructors (`duckdb.list(...)`, `duckdb.struct({...})`, `duckdb.lambda`,
 `qualify`/`sample`/`pivot`/join-variant keys.
 
 On DuckDB's own 23,670-statement test corpus: the PostgreSQL front end parses
-68.9%, the DuckDB front end **93.2%**, and **99.0%** of what parses round-trips
+68.9%, the DuckDB front end **94.0%**, and **99.0%** of what parses round-trips
 back to SQL DuckDB accepts (verified against a live DuckDB parser in CI).
 
 ### Known limitations
