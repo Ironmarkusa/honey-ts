@@ -88,6 +88,14 @@ export type {
 } from "./analyze.js";
 
 // ============================================================================
+// 4a. The environment — configure dialect/schema/catalog once, get memoized,
+//     dialect-aware everything downstream
+// ============================================================================
+
+export { createEnv } from "./env.js";
+export type { Env, EnvConfig, CatalogFunction } from "./env.js";
+
+// ============================================================================
 // 4b. Query-builder foundation — schema loading, type inference, deep
 //     validation, and stable node addressing for UIs
 // ============================================================================

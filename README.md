@@ -233,6 +233,37 @@ DUCKDB_FUNCTIONS_BY_NAME.get('date_trunc');
 //   args: [{ name: 'part', type: 'VARCHAR' }, ...], overloads: [...] }
 ```
 
+## The Environment
+
+Configure the world once at your composition root; everything downstream is
+dialect-aware, schema-aware, and memoized:
+
+```typescript
+import { createEnv } from 'honey-ts';
+import { DUCKDB_FUNCTIONS_BY_NAME } from 'honey-ts/duckdb-ops';  // the ONE dialect-specific import
+
+const env = createEnv({
+  dialect: 'duckdb',
+  schema,                              // from schemaFromDuckDb(...)
+  catalog: DUCKDB_FUNCTIONS_BY_NAME,   // powers inference + function pickers
+  format: { quoted: false },           // your org's emit defaults
+});
+
+const clause = env.parse("SELECT plan, sum(total) FROM orders GROUP BY plan");
+env.validate(clause);                  // memoized per document (WeakMap)
+env.typeOf(clause, ["%sum", "total"]); // { type: "numeric(10,2)", nullable: true }
+env.operatorsFor("text");              // never suggests what emit would reject
+env.functionsFor("text");              // catalog-driven picker data
+env.emittable(clause);                 // ["postgres", "duckdb"] — portability up front
+const [sql, ...params] = env.emit(clause);
+```
+
+The env is **frozen and stateless**: it holds the world (dialect, schema,
+catalog), never documents. Every method is pure delegation over the free
+functions below — which remain fully supported — plus memoization that
+immutable documents make safe. Schema changed? Build a new env. Want the same
+report on both engines? Two envs, one document.
+
 ## Query-Builder Foundation
 
 Four subsystems for building schema-aware query UIs on top of the clause map:
