@@ -632,3 +632,89 @@ describe("pre-existing parser bugs fixed along the way", () => {
     assert.doesNotMatch(out, /MATERIALIZED/);
   });
 });
+
+// ===========================================================================
+describe("set operations and grouping extras", () => {
+  test("EXCEPT round-trips", async () => {
+    await roundTrips("SELECT 1 EXCEPT SELECT 2", "SELECT 1 EXCEPT SELECT 2");
+  });
+
+  test("INTERSECT round-trips", async () => {
+    await roundTrips("SELECT 1 INTERSECT SELECT 1", "SELECT 1 INTERSECT SELECT 1");
+  });
+
+  test("EXCEPT ALL round-trips", async () => {
+    await roundTrips("SELECT 1 a EXCEPT ALL SELECT 1 a");
+  });
+
+  test("mixed set-op chains stay left-associative", async () => {
+    // pgsql-ast-parser right-nests; the parser rebuilds left-associative —
+    // (1 EXCEPT 1) UNION 2 = {1,2}, not 1 EXCEPT (1 UNION 2) = {}.
+    await roundTrips(
+      "SELECT 1 EXCEPT SELECT 1 UNION SELECT 2",
+      "SELECT 1 EXCEPT SELECT 1 UNION SELECT 2"
+    );
+  });
+
+  test("IS DISTINCT FROM round-trips", async () => {
+    await roundTrips(
+      "SELECT 1 IS DISTINCT FROM NULL",
+      "SELECT 1 IS DISTINCT FROM NULL"
+    );
+  });
+
+  test("chained IS [NOT] DISTINCT FROM with AND", async () => {
+    await roundTrips("SELECT a IS DISTINCT FROM b AND a IS NOT DISTINCT FROM c FROM t");
+  });
+
+  test("list comprehension lowers to list_transform", async () => {
+    await roundTrips(
+      "SELECT [x*2 for x in [1,2,3] if x > 1]",
+      `SELECT LIST_TRANSFORM(LIST_FILTER([1, 2, 3], "x" -> "x" > 1), "x" -> "x" * 2)`
+    );
+  });
+
+  test("bare FROM VALUES gains parentheses", async () => {
+    await roundTrips("SELECT col FROM VALUES (0), (1) AS tab(col)");
+  });
+
+  test("bare HAVING without GROUP BY", async () => {
+    await roundTrips("SELECT 42 HAVING 42 > 20", "SELECT 42 HAVING 42 > 20");
+  });
+
+  test("FILTER without WHERE is normalised", async () => {
+    const out = await roundTrips("SELECT sum(x) FILTER (x > 1) FROM t");
+    assert.match(out, /FILTER \(WHERE/);
+  });
+
+  test("empty grouping items round-trip", async () => {
+    await roundTrips("SELECT count(*) FROM t GROUP BY (), a");
+  });
+
+  test("trailing commas are dropped", async () => {
+    await roundTrips("SELECT 1 a, 2 b, FROM t", `SELECT 1 AS "a", 2 AS "b" FROM "t"`);
+  });
+
+  test("NULLS ordering inside aggregate ORDER BY", async () => {
+    await roundTrips("SELECT first(i ORDER BY i NULLS LAST) FROM t");
+  });
+
+  test("casts inside list literals are not slices", async () => {
+    await roundTrips("SELECT [0.43::float, 0.6::float]");
+  });
+
+  test("subscript with a cast index is not a slice", async () => {
+    await roundTrips("SELECT a[2::int] FROM t");
+  });
+
+  test("FROM-first keeps trailing clauses after FROM", async () => {
+    const out = await roundTrips(
+      "FROM (VALUES (1,2),(3,4)) AS t(k, v) SELECT DISTINCT ON (k) * ORDER BY k"
+    );
+    assert.ok(out.indexOf("FROM") < out.indexOf("ORDER BY"), out);
+  });
+
+  test("subscript field chains", async () => {
+    await roundTrips("SELECT l[1].x FROM t", `SELECT ("l"[1])."x" FROM "t"`);
+  });
+});

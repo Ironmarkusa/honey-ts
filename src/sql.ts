@@ -942,9 +942,10 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
 
     const items = Array.isArray(orderBy) ? orderBy : [orderBy];
     const orderSqls = items.map((item) => {
-      // Each item is either an expression or [expr, "asc"|"desc"].
+      // Each item is either an expression or [expr, direction] where the
+      // direction may carry a NULLS placement: "desc", "asc nulls last", ...
       if (Array.isArray(item) && item.length === 2 && typeof item[1] === "string" &&
-          /^(asc|desc)$/i.test(item[1])) {
+          /^(asc|desc)(\s+nulls\s+(first|last))?$/i.test(item[1])) {
         const [sql, ...p] = formatExpr(item[0] as SqlExpr, ctx);
         params.push(...p);
         return `${sql} ${item[1].toUpperCase()}`;

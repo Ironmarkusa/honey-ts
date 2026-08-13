@@ -75,6 +75,10 @@ function main() {
         // sqllogictest allows trailing `# ...` comments on a statement line.
         // They are harness syntax, not SQL, so strip them before anything else.
         .replace(/\s+#\s.*$/gm, "")
+        // SQL line comments must go BEFORE whitespace squashing: collapsing
+        // newlines first would extend `-- note` over the rest of the
+        // statement, silently corrupting it.
+        .replace(/--[^\n]*/g, "")
         .replace(/;\s*$/, "")
         .replace(/\s+/g, " ")
         .trim();

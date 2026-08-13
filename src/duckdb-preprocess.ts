@@ -40,6 +40,11 @@ export const SENTINEL = {
   slice: "__honey_slice",
   namedArg: "__honey_named",
   collate: "__honey_collate",
+  isDistinct: "__honey_isdf",
+  isNotDistinct: "__honey_isndf",
+  setOp: "__honey_setop",
+  having: "__honey_having",
+  emptyGroup: "__honey_gs0",
   ignoreNulls: "__honey_ignore_nulls",
   respectNulls: "__honey_respect_nulls",
   subqueryAlias: "__hsq",
@@ -70,7 +75,7 @@ function q(text: string): string {
 
 /** Clause keywords that terminate an expression captured mid-statement. */
 const CLAUSE_BOUNDARY =
-  /^(WHERE|GROUP|HAVING|WINDOW|QUALIFY|ORDER|LIMIT|OFFSET|FETCH|UNION|EXCEPT|INTERSECT|RETURNING|USING|ON\s+CONFLICT|FOR)\b/i;
+  /^(FROM|WHERE|GROUP|HAVING|WINDOW|QUALIFY|ORDER|LIMIT|OFFSET|FETCH|UNION|EXCEPT|INTERSECT|RETURNING|USING|ON\s+CONFLICT|FOR)\b/i;
 
 /**
  * Find where a clause-level expression ends: the next top-level clause
@@ -280,6 +285,27 @@ export function splitTopLevel(sql: string, guard: (i: number) => boolean, offset
 // ===========================================================================
 
 /**
+ * True when the bracket body has a top-level bare colon — the slice separator.
+ * `::` casts and colons nested inside braces/brackets/parens do not count.
+ */
+function hasTopLevelSliceColon(inner: string): boolean {
+  const guard = makeGuard(inner);
+  let depth = 0;
+  for (let i = 0; i < inner.length; i++) {
+    if (guard(i)) continue;
+    const ch = inner[i]!;
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === ":" && depth === 0) {
+      if (inner[i + 1] === ":" || inner[i - 1] === ":") { i++; continue; }
+      if (inner[i + 1] === "=") { i++; continue; } // := named arg
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Keywords after which a `[` opens a list literal rather than a subscript.
  *
  * `a[1]` is indexing; `SELECT [1]` is a literal. Both are preceded by a word
@@ -326,8 +352,9 @@ function rewriteListLiterals(sql: string): string {
       if (close === -1) continue;
 
       const inner = out.slice(i + 1, close);
-      // A colon at top level means this is a slice, not a list.
-      if (/^[^,]*:[^=]/.test(inner)) continue;
+      // A colon at top level means this is a slice, not a list — but `::`
+      // casts and struct-literal colons (inside braces, depth > 0) don't count.
+      if (hasTopLevelSliceColon(inner)) continue;
 
       const items = splitTopLevel(inner, guard, i + 1);
       out = `${out.slice(0, i)}${SENTINEL.list}(${items.join(", ")})${out.slice(close + 1)}`;
@@ -682,7 +709,12 @@ function rewriteSlices(sql: string): string {
         const ch = inner[j];
         if (ch === "(" || ch === "[" || ch === "{") depth++;
         else if (ch === ")" || ch === "]" || ch === "}") depth--;
-        else if (ch === ":" && depth === 0) { colon = j; break; }
+        else if (ch === ":" && depth === 0) {
+          // `::` casts inside a subscript (a[b::int]) are not slice colons.
+          if (inner[j + 1] === ":" || inner[j - 1] === ":") { j++; continue; }
+          colon = j;
+          break;
+        }
       }
       if (colon === -1) continue;
 
@@ -902,7 +934,10 @@ function rewriteFieldAccess(sql: string): string {
   let out = sql;
   for (let pass = 0; pass < 40; pass++) {
     const guard = makeGuard(out);
-    const re = /\)\s*\.\s*([A-Za-z_]\w*|"[^"]+")/g;
+    // `).x` and `].x` — parenthesized-expression fields and subscript fields
+    // (`l[1].x`) both need the rewrite; bare `ident.x` is ordinary
+    // qualification and parses upstream.
+    const re = /[\)\]]\s*\.\s*([A-Za-z_]\w*|"[^"]+")/g;
     let m: RegExpExecArray | null;
     let changed = false;
     while ((m = re.exec(out)) !== null) {
@@ -975,6 +1010,233 @@ function rewriteIntervalUnit(sql: string): string {
       out.slice(0, m.index) +
       `(${expr}) * INTERVAL '1 ${unitM[1]!.toUpperCase()}'` +
       out.slice(close + 1 + unitM[0].length);
+  }
+  return out;
+}
+
+/**
+ * `a IS [NOT] DISTINCT FROM b` -> `__honey_isdf(a, b)` / `__honey_isndf(a, b)`.
+ * Standard SQL in both dialects; pgsql-ast-parser lacks the production.
+ * IS DISTINCT binds like a comparison, so the right side ends at the next
+ * top-level AND/OR, clause keyword, comma or closing bracket.
+ */
+function rewriteIsDistinct(sql: string): string {
+  let out = sql;
+  for (let pass = 0; pass < 30; pass++) {
+    const guard = makeGuard(out);
+    const m = /\bIS\s+(NOT\s+)?DISTINCT\s+FROM\b/gi.exec(out);
+    if (!m || guard(m.index)) break;
+
+    const lhsStart = exprStartBackwards(out, m.index, guard);
+    const lhs = out.slice(lhsStart, m.index).trim();
+    if (!lhs) break;
+
+    const rhsStart = m.index + m[0].length;
+    let rhsEnd = out.length;
+    let depth = 0;
+    for (let i = rhsStart; i < out.length; i++) {
+      if (guard(i)) continue;
+      const ch = out[i]!;
+      if (ch === "(" || ch === "[") depth++;
+      else if (ch === ")" || ch === "]") { if (depth === 0) { rhsEnd = i; break; } depth--; }
+      else if (depth === 0 && ch === ",") { rhsEnd = i; break; }
+      else if (depth === 0 && /[A-Za-z]/.test(ch) && /\s/.test(out[i - 1] ?? "") &&
+        (/^(AND|OR|THEN|ELSE|WHEN|END|AS|IS)\b/i.test(out.slice(i)) || CLAUSE_BOUNDARY.test(out.slice(i)))) {
+        rhsEnd = i;
+        break;
+      }
+    }
+    const rhs = out.slice(rhsStart, rhsEnd).trim();
+    const sentinel = m[1] ? SENTINEL.isNotDistinct : SENTINEL.isDistinct;
+    out =
+      out.slice(0, lhsStart) +
+      `${sentinel}(${lhs}, ${rhs}) ` +
+      out.slice(rhsEnd);
+  }
+  return out;
+}
+
+/**
+ * DuckDB list comprehensions: `[expr FOR var IN list]` and
+ * `[expr FOR var IN list IF cond]` rewrite to their exact library
+ * equivalents, `list_transform(list, var -> expr)` /
+ * `list_transform(list_filter(list, var -> cond), var -> expr)`.
+ * The arrow-lambda pass then handles the arrows this emits.
+ */
+function rewriteListComprehensions(sql: string): string {
+  let out = sql;
+  for (let pass = 0; pass < 20; pass++) {
+    const guard = makeGuard(out);
+    let changed = false;
+
+    for (let i = 0; i < out.length; i++) {
+      if (out[i] !== "[" || guard(i)) continue;
+      const close = matchBracket(out, i, guard);
+      if (close === -1) continue;
+      const inner = out.slice(i + 1, close);
+
+      // A top-level `FOR var IN` marks a comprehension.
+      const innerGuard = makeGuard(inner);
+      let forAt = -1;
+      let depth = 0;
+      for (let j = 0; j < inner.length; j++) {
+        if (innerGuard(j)) continue;
+        const ch = inner[j]!;
+        if (ch === "(" || ch === "[" || ch === "{") depth++;
+        else if (ch === ")" || ch === "]" || ch === "}") depth--;
+        else if (depth === 0 && /^FOR\s+[A-Za-z_]\w*\s+IN\b/i.test(inner.slice(j)) && /\s/.test(inner[j - 1] ?? "")) {
+          forAt = j;
+          break;
+        }
+      }
+      if (forAt === -1) continue;
+
+      const head = inner.slice(0, forAt).trim();
+      const forM = /^FOR\s+([A-Za-z_]\w*)\s+IN\b/i.exec(inner.slice(forAt))!;
+      const varName = forM[1]!;
+      let tail = inner.slice(forAt + forM[0].length).trim();
+
+      // Optional trailing IF filter.
+      let cond: string | null = null;
+      const tailGuard = makeGuard(tail);
+      let ifAt = -1;
+      depth = 0;
+      for (let j = 0; j < tail.length; j++) {
+        if (tailGuard(j)) continue;
+        const ch = tail[j]!;
+        if (ch === "(" || ch === "[" || ch === "{") depth++;
+        else if (ch === ")" || ch === "]" || ch === "}") depth--;
+        else if (depth === 0 && /^IF\b/i.test(tail.slice(j)) && /\s/.test(tail[j - 1] ?? "")) {
+          ifAt = j;
+          break;
+        }
+      }
+      if (ifAt !== -1) {
+        cond = tail.slice(ifAt + 2).trim();
+        tail = tail.slice(0, ifAt).trim();
+      }
+
+      const source = cond
+        ? `list_filter(${tail}, ${varName} -> ${cond})`
+        : tail;
+      out =
+        out.slice(0, i) +
+        `list_transform(${source}, ${varName} -> ${head})` +
+        out.slice(close + 1);
+      changed = true;
+      break;
+    }
+    if (!changed) break;
+  }
+  return out;
+}
+
+/**
+ * Bare `FROM VALUES (1), (2) AS t(c)` — DuckDB allows VALUES un-parenthesized
+ * in FROM position; PostgreSQL requires `FROM (VALUES ...) AS t(c)`.
+ */
+function rewriteBareFromValues(sql: string): string {
+  let out = sql;
+  for (let pass = 0; pass < 10; pass++) {
+    const guard = makeGuard(out);
+    const m = /\b(FROM|JOIN)\s+(VALUES\s*\()/gi.exec(out);
+    if (!m || guard(m.index)) break;
+
+    // Consume the row tuples: ( ... ) [, ( ... )]*
+    let cursor = m.index + m[0].length - 1;
+    for (;;) {
+      const close = matchBracket(out, cursor, guard);
+      if (close === -1) return out;
+      const next = /^\s*,\s*\(/.exec(out.slice(close + 1));
+      if (!next) { cursor = close; break; }
+      cursor = close + 1 + next[0].length - 1;
+    }
+
+    const valuesStart = m.index + m[1]!.length;
+    out =
+      out.slice(0, valuesStart) +
+      ` (` + out.slice(valuesStart, cursor + 1).trim() + `)` +
+      out.slice(cursor + 1);
+  }
+  return out;
+}
+
+/**
+ * `EXCEPT [ALL]` / `INTERSECT [ALL]` -> `UNION` carrying a marker as the first
+ * item of the right side's select list. pgsql-ast-parser only has a UNION
+ * production; reviveSentinels strips the marker and renames the clause key.
+ */
+function rewriteExceptIntersect(sql: string): string {
+  let out = sql;
+  for (let pass = 0; pass < 20; pass++) {
+    const guard = makeGuard(out);
+    let changed = false;
+    let depth = 0;
+
+    for (let i = 0; i < out.length; i++) {
+      if (guard(i)) continue;
+      const ch = out[i]!;
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      else if (depth === 0 && /[EIei]/.test(ch) && /[\s)]/.test(out[i - 1] ?? " ")) {
+        const m = /^(EXCEPT|INTERSECT)(\s+ALL)?\s+(SELECT|FROM)\b/i.exec(out.slice(i));
+        if (!m) continue;
+        const kind = m[1]!.toLowerCase() + (m[2] ? "-all" : "");
+        // The marker rides as an extra select item on the right side.
+        const rightKw = m[3]!.toUpperCase();
+        const afterKw = i + m[0].length;
+        if (rightKw === "SELECT") {
+          out =
+            out.slice(0, i) +
+            `UNION SELECT ${SENTINEL.setOp}(${q(kind)}), ` +
+            out.slice(afterKw);
+        } else {
+          // EXCEPT FROM t ... — rare FROM-first side; let rewriteFromFirst
+          // handle the SELECT insertion by leaving it and skipping here.
+          continue;
+        }
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) break;
+  }
+  return out;
+}
+
+/**
+ * Parenthesized set-operation operands: `(SELECT ... ORDER BY x) EXCEPT ...`.
+ * pgsql-ast-parser cannot parse a parenthesized statement as a set-op side;
+ * each side becomes `SELECT * FROM (side)`, which is semantically identical.
+ */
+function rewriteParenSetOps(sql: string): string {
+  let out = sql;
+  for (let pass = 0; pass < 10; pass++) {
+    const guard = makeGuard(out);
+    let changed = false;
+
+    for (let i = 0; i < out.length; i++) {
+      if (out[i] !== "(" || guard(i)) continue;
+      if (!/^\s*(SELECT|WITH|VALUES|FROM)\b/i.test(out.slice(i + 1))) continue;
+      const close = matchBracket(out, i, guard);
+      if (close === -1) continue;
+
+      // A set-op keyword directly after the group, and statement position
+      // directly before it (start of text, or another set-op keyword).
+      const after = /^\s*(UNION|EXCEPT|INTERSECT)\b/i.exec(out.slice(close + 1));
+      const beforeText = out.slice(0, i).trim();
+      const inStatementPos =
+        beforeText === "" || /(UNION|EXCEPT|INTERSECT)(\s+ALL|\s+BY\s+NAME)?$/i.test(beforeText);
+      if (!after || !inStatementPos) continue;
+
+      out =
+        out.slice(0, i) +
+        `SELECT * FROM ${out.slice(i, close + 1)} AS ${SENTINEL.subqueryAlias}s` +
+        out.slice(close + 1);
+      changed = true;
+      break;
+    }
+    if (!changed) break;
   }
   return out;
 }
@@ -1564,6 +1826,136 @@ function rewriteQualify(sql: string): string {
 }
 
 /**
+ * Bare `HAVING` (no GROUP BY) — DuckDB treats the whole result as one group;
+ * pgsql-ast-parser rejects HAVING without GROUP BY. Same trick as QUALIFY:
+ * the expression rides a `__honey_having(...)` marker in WHERE and
+ * reviveSentinels lifts it back out.
+ */
+function rewriteBareHaving(sql: string): string {
+  let out = sql;
+  for (let pass = 0; pass < 20; pass++) {
+    const guard = makeGuard(out);
+    const re = /\bHAVING\b/gi;
+    let m: RegExpExecArray | null;
+    let changed = false;
+    while ((m = re.exec(out)) !== null) {
+      if (guard(m.index)) continue;
+
+      // Same-scope GROUP BY / WHERE lookback.
+      let groupAt = -1;
+      let whereAt = -1;
+      let depth = 0;
+      for (let i = m.index - 1; i >= 0; i--) {
+        if (guard(i)) continue;
+        const ch = out[i]!;
+        if (ch === ")") depth++;
+        else if (ch === "(") { if (depth === 0) break; depth--; }
+        else if (depth === 0 && /[GWgw]/.test(ch) && /[\s(]/.test(out[i - 1] ?? " ")) {
+          const rest = out.slice(i);
+          if (groupAt === -1 && /^GROUP\s+BY\b/i.test(rest)) groupAt = i;
+          else if (whereAt === -1 && /^WHERE\b/i.test(rest)) whereAt = i;
+        }
+      }
+      if (groupAt !== -1) continue; // ordinary HAVING; parses upstream
+
+      const exprStart = m.index + m[0].length;
+      const exprEnd = findClauseEnd(out, exprStart, guard);
+      const expr = out.slice(exprStart, exprEnd).trim();
+      const marker = `${SENTINEL.having}(${expr})`;
+      if (whereAt !== -1) {
+        out = out.slice(0, m.index).replace(/\s+$/, " ") + `AND ${marker} ` + out.slice(exprEnd);
+      } else {
+        out = out.slice(0, m.index) + `WHERE ${marker} ` + out.slice(exprEnd);
+      }
+      changed = true;
+      break;
+    }
+    if (!changed) break;
+  }
+  return out;
+}
+
+/**
+ * `FILTER (cond)` -> `FILTER (WHERE cond)` — DuckDB makes WHERE optional.
+ */
+function rewriteFilterWhere(sql: string): string {
+  let out = sql;
+  for (let pass = 0; pass < 30; pass++) {
+    const guard = makeGuard(out);
+    const re = /\bFILTER\s*\(\s*/gi;
+    let m: RegExpExecArray | null;
+    let changed = false;
+    while ((m = re.exec(out)) !== null) {
+      if (guard(m.index)) continue;
+      if (/^WHERE\b/i.test(out.slice(m.index + m[0].length))) continue;
+      out =
+        out.slice(0, m.index + m[0].length) +
+        "WHERE " +
+        out.slice(m.index + m[0].length);
+      changed = true;
+      break;
+    }
+    if (!changed) break;
+  }
+  return out;
+}
+
+/**
+ * Empty grouping items: `GROUP BY (), a` / `..., ()` — the grand-total set.
+ * Each bare `()` becomes `__honey_gs0()`, revived to raw `()`.
+ */
+function rewriteEmptyGroupItems(sql: string): string {
+  let out = sql;
+  for (let pass = 0; pass < 20; pass++) {
+    const guard = makeGuard(out);
+    const m = /\b(GROUP\s+BY\s|,\s*)\(\s*\)/gi.exec(out);
+    if (!m || guard(m.index)) break;
+    // Only inside a GROUP BY list: a GROUP BY keyword must precede at depth 0.
+    if (m[1]!.startsWith(",")) {
+      const before = out.slice(0, m.index);
+      const bg = makeGuard(before);
+      let depth = 0;
+      let sawGroupBy = false;
+      for (let i = before.length - 1; i >= 0; i--) {
+        if (bg(i)) continue;
+        const ch = before[i]!;
+        if (ch === ")") depth++;
+        else if (ch === "(") { if (depth === 0) break; depth--; }
+        else if (depth === 0 && /[Gg]/.test(ch) && /^GROUP\s+BY\b/i.test(before.slice(i))) { sawGroupBy = true; break; }
+        else if (depth === 0 && /[A-Za-z]/.test(ch) && /\s/.test(before[i - 1] ?? "") && CLAUSE_BOUNDARY.test(before.slice(i))) break;
+      }
+      if (!sawGroupBy) break;
+    }
+    out =
+      out.slice(0, m.index) +
+      m[1] +
+      `${SENTINEL.emptyGroup}()` +
+      out.slice(m.index + m[0].length);
+  }
+  return out;
+}
+
+/**
+ * Trailing commas — `SELECT a, b, FROM t` — are legal DuckDB, not PostgreSQL.
+ */
+function rewriteTrailingCommas(sql: string): string {
+  const guard = makeGuard(sql);
+  let out = "";
+  for (let i = 0; i < sql.length; i++) {
+    if (!guard(i) && sql[i] === ",") {
+      const rest = sql.slice(i + 1);
+      const next = /^\s*/.exec(rest)![0].length;
+      const afterWs = rest.slice(next);
+      if (/^\)/.test(afterWs) || CLAUSE_BOUNDARY.test(afterWs) || afterWs === "") {
+        continue; // drop the comma
+      }
+    }
+    out += sql[i];
+  }
+  return out;
+}
+
+/**
  * Integer division `a // b` -> `a / __honey_idiv() / b`. Division is
  * left-associative, so the parse comes back as (a / marker) / b and
  * reviveSentinels folds it into ["//", a, b].
@@ -1698,8 +2090,27 @@ function rewriteFromFirst(sql: string): string {
     else if (depth === 0 && /^SELECT\b/i.test(trimmed.slice(i)) && /[\s)]/.test(trimmed[i - 1] ?? " ")) {
       const fromPart = trimmed.slice(0, i).trim();
       const rest = trimmed.slice(i + "SELECT".length).trim();
-      // Trailing clauses (WHERE/GROUP BY/...) stay attached to the projection.
-      return `${sql.slice(0, lead)}SELECT ${rest} ${fromPart}`;
+      // The FROM part must sit between the select list and any trailing
+      // clauses: `FROM t SELECT DISTINCT ON (k) * ORDER BY k` becomes
+      // `SELECT DISTINCT ON (k) * FROM t ORDER BY k`, never `... ORDER BY k
+      // FROM t`.
+      const restGuard = makeGuard(rest);
+      let splitAt = rest.length;
+      let d = 0;
+      for (let j = 0; j < rest.length; j++) {
+        if (restGuard(j)) continue;
+        const ch = rest[j]!;
+        if (ch === "(" || ch === "[") d++;
+        else if (ch === ")" || ch === "]") d--;
+        else if (d === 0 && /[A-Za-z]/.test(ch) && (j === 0 || /[\s)]/.test(rest[j - 1]!)) &&
+          CLAUSE_BOUNDARY.test(rest.slice(j))) {
+          splitAt = j;
+          break;
+        }
+      }
+      const selectList = rest.slice(0, splitAt).trim();
+      const tailClauses = rest.slice(splitAt).trim();
+      return `${sql.slice(0, lead)}SELECT ${selectList} ${fromPart}${tailClauses ? " " + tailClauses : ""}`;
     }
   }
 
@@ -1753,10 +2164,16 @@ function rewriteAggOrderBy(sql: string): string {
       // `val DESC` is not valid in argument position, so each ORDER BY item is
       // wrapped with its direction carried as a string argument.
       const orderItems = splitTopLevel(orderBy, makeGuard(orderBy), 0).map((item) => {
-        const dir = /\s+(ASC|DESC)\s*(NULLS\s+(FIRST|LAST))?$/i.exec(item);
-        if (!dir) return `${SENTINEL.orderItem}(${item}, 'asc')`;
+        // Direction and NULLS placement are both optional, in any combination:
+        // `x`, `x DESC`, `x NULLS LAST`, `x ASC NULLS FIRST`.
+        const dir = /(\s+(ASC|DESC))?(\s+NULLS\s+(FIRST|LAST))?\s*$/i.exec(item)!;
         const expr = item.slice(0, dir.index).trim();
-        return `${SENTINEL.orderItem}(${expr}, '${dir[1]!.toLowerCase()}')`;
+        if (!expr) return `${SENTINEL.orderItem}(${item}, 'asc')`;
+        const parts = [
+          (dir[2] ?? "asc").toLowerCase(),
+          dir[4] ? `nulls ${dir[4].toLowerCase()}` : "",
+        ].filter(Boolean);
+        return `${SENTINEL.orderItem}(${expr}, '${parts.join(" ")}')`;
       });
 
       out =
@@ -1795,14 +2212,20 @@ export function preprocessDuckDb(sql: string): string {
   out = rewriteDollarQuotes(out);
   out = rewriteEqEq(out);
   out = rewriteEmbeddedStatements(out);
+  out = rewriteParenSetOps(out);
+  out = rewriteExceptIntersect(out);
   out = rewriteMaterialized(out);
   out = rewriteCteColumnAliases(out);
+  out = rewriteBareFromValues(out);
   out = rewriteTryCast(out);
   out = rewriteInsertModifiers(out);
   out = rewriteWindowClause(out);
   out = rewriteFrames(out);
   out = rewriteExportState(out);
   out = rewriteLambdaKeyword(out);
+  // Comprehensions expand to list_transform/list_filter with arrows, which
+  // the arrow pass below then converts — so this must sit between them.
+  out = rewriteListComprehensions(out);
   out = rewriteNamedArgs(out);
   out = rewriteArrowLambdas(out);
   out = rewriteStarModifiers(out);
@@ -1813,16 +2236,23 @@ export function preprocessDuckDb(sql: string): string {
   out = rewriteListLiterals(out);
   out = rewriteComplexCastTypes(out);
   out = rewriteFieldAccess(out);
+  out = rewriteIsDistinct(out);
   out = rewriteScientific(out);
   out = rewriteIntervalUnit(out);
   out = rewriteCollate(out);
   out = rewriteNullsModifier(out);
   out = rewriteUnaliasedSubqueries(out);
   out = rewriteAggOrderBy(out);
+  out = rewriteFilterWhere(out);
   out = rewriteGroupingSets(out);
+  out = rewriteEmptyGroupItems(out);
+  out = rewriteTrailingCommas(out);
   out = rewriteJoins(out);
   out = rewriteUsingSample(out);
   out = rewriteQualify(out);
+  // Bare HAVING after QUALIFY: QUALIFY may have created a HAVING with a
+  // GROUP BY present; the bare-HAVING pass only touches group-less scopes.
+  out = rewriteBareHaving(out);
   out = rewriteIdiv(out);
   out = rewriteByAll(out);
   out = rewriteFromFirst(out);
@@ -2087,6 +2517,12 @@ export function reviveSentinels(value: unknown, ctx: ReviveContext = {}): unknow
         case SENTINEL.collate:
           return ["collate", revivedArgs[0]!, constString(revivedArgs[1])];
 
+        case SENTINEL.isDistinct:
+          return ["is-distinct-from", revivedArgs[0]!, revivedArgs[1]!];
+
+        case SENTINEL.isNotDistinct:
+          return ["is-not-distinct-from", revivedArgs[0]!, revivedArgs[1]!];
+
         case SENTINEL.ignoreNulls:
           return ["ignore-nulls", revivedArgs[0]!];
 
@@ -2148,6 +2584,10 @@ export function reviveSentinels(value: unknown, ctx: ReviveContext = {}): unknow
           // GROUP BY ALL / ORDER BY ALL — a bare keyword, not a column named
           // "all", so it must not go through identifier quoting.
           return { __raw: "ALL" };
+
+        case SENTINEL.emptyGroup:
+          // The grand-total grouping item: GROUP BY (), a.
+          return { __raw: "()" };
       }
     }
 
@@ -2181,12 +2621,14 @@ export function reviveSentinels(value: unknown, ctx: ReviveContext = {}): unknow
         : stripAlias(out.from);
     }
 
-    // QUALIFY and USING SAMPLE ride through the parse inside HAVING/WHERE.
+    // QUALIFY, USING SAMPLE and bare HAVING ride through the parse inside
+    // HAVING/WHERE.
     for (const clauseKey of ["having", "where"] as const) {
       if (out[clauseKey] === undefined) continue;
       const { rest, found } = extractMarkers(out[clauseKey] as SqlExpr, [
         SENTINEL.qualify,
         SENTINEL.sample,
+        SENTINEL.having,
       ]);
       if (found.size === 0) continue;
       if (rest === undefined) delete out[clauseKey];
@@ -2195,6 +2637,24 @@ export function reviveSentinels(value: unknown, ctx: ReviveContext = {}): unknow
       if (qualify) out.qualify = qualify.length === 1 ? qualify[0] : ["and", ...qualify];
       const sample = found.get(SENTINEL.sample);
       if (sample) out.sample = parseSampleSpec(constString(sample[0]));
+      const having = found.get(SENTINEL.having);
+      if (having) out.having = having.length === 1 ? having[0] : ["and", ...having];
+    }
+
+    // EXCEPT/INTERSECT markers: the parser rebuilds set-op chains binary and
+    // left-associative, so a marker leading the RIGHT side's select list
+    // names this node's true operator.
+    for (const setKey of ["union", "union-all"] as const) {
+      const sides = out[setKey];
+      if (!Array.isArray(sides) || sides.length !== 2) continue;
+      const right = sides[1] as SqlClause;
+      if (!isClause(right) || !Array.isArray(right.select)) continue;
+      const head = (right.select as SqlExpr[])[0];
+      if (!isSentinelCall(head, SENTINEL.setOp)) continue;
+      const kind = constString((head as SqlExpr[])[1]);
+      right.select = (right.select as SqlExpr[]).slice(1);
+      out[kind] = sides;
+      delete out[setKey];
     }
 
     // Join-variant markers -> their own clause keys.

@@ -754,6 +754,34 @@ function statementToClause(stmt: Statement): SqlClause {
           row.map(exprToClause)
         ),
       };
+    case "union":
+    case "union all": {
+      // pgsql-ast-parser nests chains to the RIGHT (A UNION (B UNION C)), but
+      // SQL set operations are LEFT-associative — (A UNION B) UNION C — and
+      // for mixed chains the difference changes results. Flatten the right
+      // spine and rebuild left-associative, keeping each operator's text
+      // order. EXCEPT/INTERSECT arrive as UNION with a __honey_setop marker
+      // in the right side's select list (pgsql has no production for them);
+      // rebuilding binary here puts every marker on its own node's right
+      // side, where reviveSentinels renames that node's key locally.
+      const sides: SqlClause[] = [];
+      const ops: string[] = [];
+      let node: Statement = stmt;
+      for (;;) {
+        const setOp = node as unknown as { type: string; left: Statement; right: Statement };
+        if (setOp.type !== "union" && setOp.type !== "union all") break;
+        sides.push(statementToClause(setOp.left));
+        ops.push(setOp.type === "union all" ? "union-all" : "union");
+        node = setOp.right;
+      }
+      sides.push(statementToClause(node));
+
+      let acc: SqlClause = sides[0]!;
+      for (let i = 0; i < ops.length; i++) {
+        acc = { [ops[i]!]: [acc, sides[i + 1]!] } as SqlClause;
+      }
+      return acc;
+    }
     default:
       // For unsupported statements, return raw SQL
       return { raw: astToSql.statement(stmt) };
