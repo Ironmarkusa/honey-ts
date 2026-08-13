@@ -161,6 +161,10 @@ export function createEnv(config: EnvConfig = {}): Env {
       if (fn.functionType && fn.functionType !== "scalar" && fn.functionType !== "aggregate") {
         continue;
       }
+      // Operator-functions ("+", "||", "~~") live in the catalog too; a
+      // function picker wants functions, not operator spellings.
+      const bare = fn.name.replace(/^%/, "");
+      if (!/^[a-z_][a-z0-9_]*$/.test(bare)) continue;
       const overloads = fn.overloads?.length
         ? fn.overloads
         : [{ args: fn.args, returnType: fn.returnType }];
@@ -173,6 +177,10 @@ export function createEnv(config: EnvConfig = {}): Env {
         if (first === "ANY" || first.startsWith("ANY")) add("*", fn);
         else add(baseType(first.toLowerCase()), fn);
       }
+    }
+    // Deterministic order within each bucket.
+    for (const list of index.values()) {
+      list.sort((a, b) => a.name.localeCompare(b.name));
     }
     return index;
   };
@@ -226,13 +234,18 @@ export function createEnv(config: EnvConfig = {}): Env {
       if (!config.catalog) return getBuilder().getFunctionsForType(type);
       fnIndex ??= buildFnIndex();
       const family = baseType(type.toLowerCase());
-      // Family aliases mirror normalizeType's canon loosely.
-      const keys = new Set<string>(["*", family]);
-      if (family === "text") keys.add("varchar");
-      if (family === "varchar") keys.add("text");
+      // Family aliases mirror normalizeType's canon loosely. Type-specific
+      // buckets come FIRST — a picker for a timestamp column should lead with
+      // date functions, not generic ANY-typed utilities.
+      const keys: string[] = [family];
+      if (family === "text") keys.push("varchar");
+      if (family === "varchar") keys.push("text");
       if (["smallint", "integer", "bigint", "numeric", "double", "decimal"].includes(family)) {
-        for (const k of ["smallint", "integer", "bigint", "numeric", "double", "decimal", "hugeint"]) keys.add(k);
+        for (const k of ["smallint", "integer", "bigint", "numeric", "double", "decimal", "hugeint"]) {
+          if (!keys.includes(k)) keys.push(k);
+        }
       }
+      keys.push("*");
       const out: FunctionInfo[] = [];
       const seen = new Set<string>();
       for (const key of keys) {

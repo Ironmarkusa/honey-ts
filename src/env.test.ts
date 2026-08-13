@@ -164,3 +164,47 @@ describe("emittable — document portability", () => {
     assert.equal(env.emittable(clause), env.emittable(clause));
   });
 });
+
+describe("polish: picker quality and validation noise", () => {
+  const env = createEnv({ dialect: "duckdb", schema: SCHEMA, catalog: DUCKDB_FUNCTIONS_BY_NAME });
+
+  test("functionsFor never returns operator spellings", () => {
+    for (const type of ["timestamp", "text", "integer"]) {
+      const names = env.functionsFor(type).map((f) => f.name.replace(/^%/, ""));
+      for (const n of names) {
+        assert.match(n, /^[a-z_][a-z0-9_]*$/, `operator-ish entry leaked: ${n}`);
+      }
+    }
+  });
+
+  test("type-specific functions rank above generic ANY-typed ones", () => {
+    const names = env.functionsFor("timestamp").map((f) => f.name);
+    const specific = names.indexOf("%age");        // age(TIMESTAMP)
+    const generic = names.indexOf("%alias");       // alias(ANY)
+    assert.ok(specific !== -1, "timestamp-specific fn present");
+    assert.ok(generic === -1 || specific < generic, "specific before generic");
+  });
+
+  test("unknown column does not cascade into ungrouped-column", () => {
+    const result = env.validate(env.parse("SELECT plann, sum(total) FROM orders"));
+    const codes = result.problems.map((p) => p.code);
+    assert.deepEqual(codes, ["unknown-column"], JSON.stringify(result.problems));
+  });
+
+  test("did-you-mean reaches across the schema when scope has no match", () => {
+    // "plann" is close to users.plan, but the query only scopes orders.
+    const withUsers = createEnv({
+      dialect: "duckdb",
+      schema: {
+        tables: [
+          ...SCHEMA.tables,
+          { name: "users", schema: "main", columns: [{ name: "plan", type: "TEXT", nullable: false }] },
+        ],
+      },
+      catalog: DUCKDB_FUNCTIONS_BY_NAME,
+    });
+    const result = withUsers.validate(withUsers.parse("SELECT plann FROM orders"));
+    const p = result.problems.find((x) => x.code === "unknown-column")!;
+    assert.match(p.hint ?? "", /plan.*users/, p.hint ?? "(no hint)");
+  });
+});

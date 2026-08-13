@@ -1,0 +1,86 @@
+
+━━ 1. schema introspection → createEnv ━━
+tables: orders(5 cols), users(4 cols)
+FK found: orders.user_id → users.id
+
+━━ 2. parse LLM SQL → plain-data clause map ━━
+{
+  "select": [
+    {
+      "ident": [
+        "u",
+        "plan"
+      ]
+    },
+    [
+      [
+        "%sum",
+        {
+          "ident": [
+            "o",
+            "total"
+          ]
+        }
+      ],
+      "revenue"
+    ],
+    [
+      [
+        "%count",
+        "*"
+      ],
+      "orders"
+    ]
+  ],
+  "from": [
+    [
+      "users",
+      "u"
+    ]
+  ],
+  "join": [
+    [
+      [
+        …
+
+━━ 3. modify.addWhere — tenant isolation ━━
+SELECT u.plan, SUM(o.total) AS revenue, COUNT(*) AS orders FROM users AS u INNER JOIN orders AS o ON u.id = o.user_id WHERE (o.placed_at >= '2026-08-01') AND (o.tenant_id = 't1') GROUP BY u.plan
+
+━━ 4. type inference ━━
+u.plan                : { type: 'text', nullable: false }
+sum(o.total)          : { type: 'numeric(10,2)', nullable: true }
+date_trunc month      : { type: 'timestamp', nullable: true }
+total > 100 (predicate) : { type: 'boolean', nullable: false }
+operators for text     : = <> is is-not in not-in < <= > >= between like ilike ~ ~*
+functions for timestamp: ADD, AGE, APPROX_QUANTILE, ARG_MAX, ARG_MAX_NULL, ARG_MAX_NULLS_LAST, ARG_MIN, ARG_MIN_NULL …
+
+━━ 5. validation ━━
+current doc valid? true
+[error] unknown-column @ root.select
+  Column "plann" cannot be resolved against the tables in scope
+  Did you mean "plan" (on table "users")?
+
+━━ 6. paths — the 'user clicked this chip' primitive ━━
+found predicate at path: ["where",1] = [">=",{"ident":["o","placed_at"]},{"v":"2026-08-01"}]
+after edit: placed_at >= '2026-07-01'
+
+━━ 7. emittable — document portability ━━
+this report runs on: postgres, duckdb
+list + EXCLUDE runs on: duckdb
+@@ full-text runs on  : postgres
+
+━━ 8. execute ━━
+SELECT u.plan, SUM(o.total) AS revenue, COUNT(*) AS orders FROM users AS u INNER JOIN orders AS o ON u.id = o.user_id WHERE (o.placed_at >= '2026-07-01') AND (o.tenant_id = 't1') GROUP BY u.plan
+┌─────────┬────────┬──────────┬────────┐
+│ (index) │ plan   │ revenue  │ orders │
+├─────────┼────────┼──────────┼────────┤
+│ 0       │ 'pro'  │ '200.00' │ '2'    │
+│ 1       │ 'free' │ '15.50'  │ '1'    │
+└─────────┴────────┴──────────┴────────┘
+
+━━ 9. sql`` fragments + dialect transpilation ━━
+fragment: SELECT email FROM users WHERE plan = ? AND tenant_id = ? | params: ["pro","t1"]
+pg emit  : SELECT email FROM users WHERE email ~* '^a'
+duck emit: SELECT email FROM users WHERE REGEXP_MATCHES(email, '^a', 'i')  ← ~* lowered
+masked   : SELECT md5(u.email) AS email FROM users AS u
+lineage  : plan ← users.plan | revenue ← orders.total | orders ← (computed)

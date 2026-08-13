@@ -167,8 +167,18 @@ export function validateQuery(
     tableNames.add(`${t.schema}.${t.name}`);
   }
 
+  // For cross-table did-you-mean hints when the typo'd column exists on a
+  // table that isn't in the query's scope.
+  const allColumns: Array<{ name: string; table: string }> = [];
+  for (const t of schema.tables) {
+    for (const col of t.columns) allColumns.push({ name: col.name, table: t.name });
+  }
+
   walkClauseTree(clause, (c, scope) => {
     const infer = createInferrer(schema, c, options);
+    // Columns already reported unresolved in this scope — downstream checks
+    // (GROUP BY completeness, types) skip them instead of cascading noise.
+    const unresolved = new Set<string>();
 
     // --- tables ----------------------------------------------------------
     const tableRefs: Array<{ name: string; where: string }> = [];
@@ -216,15 +226,27 @@ export function validateQuery(
       const s = identString(ref);
       if (s === null || s === "*" || s.endsWith(".*")) return;
       if (infer.resolveColumn(s)) return;
+      unresolved.add(exprKey(ref));
       // Unresolvable — is the qualifier the problem, or the column?
       const dot = s.lastIndexOf(".");
       const colName = dot === -1 ? s : s.slice(dot + 1);
+      // Hint from in-scope columns first; fall back to the whole schema and
+      // say which table the near-miss lives on.
+      let hint = didYouMean(colName, scopeColumnNames());
+      if (!hint) {
+        const near = didYouMean(colName, allColumns.map((x) => x.name));
+        if (near) {
+          const match = /"([^"]+)"/.exec(near)?.[1];
+          const owner = allColumns.find((x) => x.name === match)?.table;
+          hint = owner ? `Did you mean "${match}" (on table "${owner}")?` : near;
+        }
+      }
       problems.push({
         severity: "error",
         code: "unknown-column",
         scope: where,
         message: `Column "${s}" cannot be resolved against the tables in scope`,
-        hint: didYouMean(colName, scopeColumnNames()),
+        hint,
       });
     };
 
@@ -305,6 +327,9 @@ export function validateQuery(
           const bare: SqlExpr[] = [];
           nonAggregatedRefs(target, bare);
           for (const ref of bare) {
+            // Already reported as unknown — a grouped-ness complaint about a
+            // column that doesn't exist is cascading noise.
+            if (unresolved.has(exprKey(ref))) continue;
             if (!groupKeys.has(exprKey(ref))) {
               const name = identString(ref);
               problems.push({
