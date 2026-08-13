@@ -390,6 +390,10 @@ clause map round-trips to real DuckDB syntax. Handled:
 | `USING SAMPLE` | `10%`, `5 ROWS`, `reservoir(10) REPEATABLE (42)` |
 | statements | `PIVOT`/`UNPIVOT` (both syntaxes), `DESCRIBE`, `SUMMARIZE`, `SHOW` |
 | INSERT modifiers | `INSERT OR REPLACE/IGNORE`, `BY NAME` |
+| set operations | `EXCEPT [ALL]`, `INTERSECT`, mixed chains kept left-associative |
+| comparisons | `IS [NOT] DISTINCT FROM` |
+| comprehensions | `[x*2 for x in l if x > 1]` → `list_transform`/`list_filter` |
+| relaxed grammar | bare `HAVING`, `FILTER (cond)`, `GROUP BY ()`, trailing commas, bare `FROM VALUES` |
 | misc | `//` division, `COLLATE`, `IGNORE NULLS`, `INTERVAL 5 SECOND`, `1.5e-3`, `$$strings$$`, `==`, FROM-first, unaliased subqueries, CTE column aliases |
 
 Rewrites are string-, identifier- and comment-aware, so construct-like text
@@ -410,7 +414,7 @@ constructors (`duckdb.list(...)`, `duckdb.struct({...})`, `duckdb.lambda`,
 `qualify`/`sample`/`pivot`/join-variant keys.
 
 On DuckDB's own 23,670-statement test corpus: the PostgreSQL front end parses
-68.9%, the DuckDB front end **90.7%**, and **99.0%** of what parses round-trips
+68.9%, the DuckDB front end **93.2%**, and **99.0%** of what parses round-trips
 back to SQL DuckDB accepts (verified against a live DuckDB parser in CI).
 
 ### Known limitations
