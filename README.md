@@ -1,6 +1,6 @@
 # honey-ts
 
-**SQL as data structures for TypeScript** - A port of [HoneySQL](https://github.com/seancorfield/honeysql) for PostgreSQL.
+**SQL as data structures for TypeScript** - A port of [HoneySQL](https://github.com/seancorfield/honeysql) for PostgreSQL and DuckDB.
 
 ```typescript
 import { format, fromSql, injectWhere } from 'honey-ts';
@@ -118,6 +118,87 @@ const secured = injectWhere(clause, ["=", "tenant_id", { $: tenantId }]);
 const [sql, ...params] = format(secured);
 ```
 
+## DuckDB Dialect
+
+honey-ts speaks DuckDB as a first-class dialect — parsing, emitting, and typed
+construction, all verified against a live DuckDB parser. On DuckDB's own
+23,675-statement test suite, `fromSql` parses **94%** and **99%** of parsed
+statements round-trip to SQL DuckDB accepts.
+
+```typescript
+import { format, fromSql, duckdb } from 'honey-ts';
+
+// Parse DuckDB syntax (lists, structs, lambdas, PIVOT, QUALIFY, ...)
+const clause = fromSql(
+  "SELECT [x * 2 for x in ids] FROM t QUALIFY row_number() OVER (PARTITION BY g) = 1",
+  { dialect: 'duckdb' }
+);
+
+// Emit DuckDB SQL
+const [sql] = format(clause, { dialect: 'duckdb' });
+
+// Or build with typed constructors
+const query = {
+  select: [
+    duckdb.list({ $: 1 }, { $: 2 }),                    // [1, 2]
+    duckdb.struct({ a: { $: 1 } }),                     // {'a': 1}
+    duckdb.star({ exclude: ['secret'] }),               // * EXCLUDE (secret)
+  ],
+  from: ['t'],
+  qualify: ['=', ['%row_number'], { $: 1 }],
+};
+```
+
+### What's covered
+
+Lists `[1,2]`, structs `{'a':1}`, `MAP {}` literals, slicing `a[1:2]`, lambdas
+(both `x -> x+1` and `lambda x: x+1`), list comprehensions, `TRY_CAST`,
+composite type casts (`::STRUCT(...)`, `::INT[3]`), field access `(x).a`,
+star `EXCLUDE`/`REPLACE`, `QUALIFY`, `GROUP BY ALL`, `GROUPING SETS`, window
+frames + named `WINDOW` clauses, `ASOF`/`SEMI`/`ANTI`/`POSITIONAL` joins,
+`USING SAMPLE`, `PIVOT`/`UNPIVOT` (both syntaxes), `DESCRIBE`/`SUMMARIZE`/`SHOW`,
+`INSERT OR REPLACE`/`IGNORE`/`BY NAME`, `EXPORT_STATE`, `EXCEPT`/`INTERSECT`,
+`IS DISTINCT FROM`, `COLLATE`, `//` division, multi-part names
+(`db.schema.table`), and DuckDB's relaxed grammar (trailing commas, bare
+`HAVING`, `FROM`-first, unaliased subqueries, ...).
+
+### Dialect separation
+
+DuckDB is **not** a superset of PostgreSQL, and the dialect boundary is
+enforced both ways:
+
+```typescript
+// PG operators DuckDB lacks are lowered when possible...
+format({ select: [['~*', 'email', { $: '^a' }]] }, { dialect: 'duckdb' });
+// => REGEXP_MATCHES(email, ?, 'i')
+
+// ...and THROW when they aren't — never emitting SQL that fails at query time
+format({ select: [['@@', 'doc', { $: 'x' }]] }, { dialect: 'duckdb' });
+// Error: Operator '@@' is not supported by dialect 'duckdb'
+
+// DuckDB-only constructs throw on postgres the same way
+format({ select: [duckdb.list({ $: 1 })] }, { dialect: 'postgres' });
+// Error: list literals require dialect 'duckdb'
+```
+
+The `->` lambda/JSON ambiguity is resolved from DuckDB's own catalog: an arrow
+is a lambda only in argument position of a function whose signature takes a
+`LAMBDA` parameter; everywhere else it stays the JSON operator.
+
+### Function catalog
+
+`honey-ts/duckdb-ops` exposes 799 functions generated from DuckDB's own
+`duckdb_functions()` — names, signatures, descriptions, and the reserved
+keyword set — for building schema-aware UIs:
+
+```typescript
+import { DUCKDB_FUNCTIONS_BY_NAME } from 'honey-ts/duckdb-ops';
+
+DUCKDB_FUNCTIONS_BY_NAME.get('date_trunc');
+// { name: '%date_trunc', label: 'DATE_TRUNC', returnType: 'TIMESTAMP',
+//   args: [{ name: 'part', type: 'VARCHAR' }, ...], overloads: [...] }
+```
+
 ## Syntax Reference
 
 ### Identifiers and Values
@@ -224,9 +305,12 @@ null              // => NULL
 npm test
 ```
 
-- **108 tests** covering parsing, formatting, and round-trips
-- **~5,500 generated SQL statements** via property-based testing with fast-check
-- Deterministic round-trip validation: `toSql(fromSql(sql)) === normalize(sql)`
+- **683 tests** covering parsing, formatting, round-trips, and dialect behavior
+- **Property-based fuzzing** with fast-check, validated against a live DuckDB parser
+- **DuckDB's own 23,675-statement test corpus** round-tripped in CI, with parse
+  and acceptance rates locked in as regression floors
+- Semantic spot-checks that *execute* original vs. round-tripped SQL on real
+  data and compare results — catching meaning changes syntax checks can't see
 
 ## License
 
