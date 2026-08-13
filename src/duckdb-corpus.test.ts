@@ -49,10 +49,10 @@ interface Fixture {
 const BASELINE = {
   /** Statements the plain PostgreSQL front end parses. Actual: 16318/23670. */
   parsedPostgres: 16318,
-  /** Statements the DuckDB front end parses (preprocessor on). Actual: 21470. */
-  parsed: 21470,
-  /** Round-tripped statements DuckDB's parser still accepts. Actual: 21251. */
-  accepted: 21251,
+  /** Statements the DuckDB front end parses (preprocessor on). Actual: 21526. */
+  parsed: 21526,
+  /** Round-tripped statements DuckDB's parser still accepts. Actual: 21305. */
+  accepted: 21305,
 };
 
 /** Errors that mean "this front end does not support that syntax", not "bug". */

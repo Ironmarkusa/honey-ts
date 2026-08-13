@@ -67,9 +67,14 @@ describe("DuckDB preprocessor: list literals", () => {
     assert.equal(out, `SELECT "weird[col]" FROM t`);
   });
 
-  test("brackets inside comments are untouched", () => {
+  test("comments are stripped, never rewritten as constructs", () => {
+    // pgsql-ast-parser cannot tokenize some valid comment contents, so the
+    // DuckDB path removes comments entirely — and their brackets must never
+    // have become list literals along the way.
     const out = preprocessDuckDb("SELECT 1 -- [1,2]\n");
-    assert.match(out, /-- \[1,2\]/);
+    assert.doesNotMatch(out, /__honey_list/);
+    assert.doesNotMatch(out, /\[1,2\]/);
+    assert.match(out, /^SELECT 1/);
   });
 });
 
@@ -259,14 +264,15 @@ describe("DuckDB preprocessor: scanner", () => {
     assert.equal(preprocessDuckDb("SELECT $$a$b$$"), "SELECT 'a$b'");
   });
 
-  test("finds block comments", () => {
-    const sql = "SELECT /* [1,2] */ 1";
-    assert.equal(preprocessDuckDb(sql), sql);
+  test("block comments are stripped whole", () => {
+    assert.equal(preprocessDuckDb("SELECT /* [1,2] */ 1").replace(/\s+/g, " "), "SELECT 1");
   });
 
-  test("nested block comments", () => {
-    const sql = "SELECT /* a /* b */ [1] */ 1";
-    assert.equal(preprocessDuckDb(sql), sql);
+  test("nested block comments are stripped whole", () => {
+    assert.equal(
+      preprocessDuckDb("SELECT /* a /* b */ [1] */ 1").replace(/\s+/g, " "),
+      "SELECT 1"
+    );
   });
 });
 

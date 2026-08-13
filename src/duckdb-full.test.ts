@@ -198,12 +198,14 @@ describe("dollar-quoted strings", () => {
 
 // ===========================================================================
 describe("scientific notation", () => {
+  // Literals emit VERBATIM: rewriting 1.5e-3 to 0.0015 would silently retype
+  // the value from DOUBLE to DECIMAL (caught by executing both forms).
   test("negative exponent", async () => {
-    await roundTrips("SELECT 1.5e-3", "SELECT 0.0015");
+    await roundTrips("SELECT 1.5e-3", "SELECT 1.5e-3");
   });
 
   test("explicit positive exponent", async () => {
-    await roundTrips("SELECT 1E+10", "SELECT 10000000000");
+    await roundTrips("SELECT 1E+10", "SELECT 1E+10");
   });
 
   test("tiny exponent keeps exponent spelling", async () => {

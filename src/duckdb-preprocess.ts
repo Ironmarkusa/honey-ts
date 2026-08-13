@@ -113,6 +113,13 @@ function exprStartBackwards(
   while (i >= 0 && /\s/.test(sql[i]!)) i--;
   if (i < 0) return 0;
 
+  // A string literal: jump to the start of its protected span.
+  if (sql[i] === "'") {
+    const spans = protectedSpans(sql);
+    const span = spans.find((s) => i >= s.start && i < s.end);
+    if (span) return span.start;
+  }
+
   if (sql[i] === ")" || sql[i] === "]" || sql[i] === "}") {
     // Balanced group.
     let depth = 0;
@@ -382,6 +389,27 @@ function rewriteStructLiterals(sql: string): string {
     if (!changed) break;
   }
   return out;
+}
+
+/**
+ * Strip SQL comments. pgsql-ast-parser cannot tokenize block comments
+ * containing `{`, `}` or an unpaired quote — all valid SQL — and comments
+ * carry no meaning for the clause map, so the DuckDB path removes them
+ * entirely. Runs first; the scanner already knows a `/*` inside a string or
+ * dollar-quote is not a comment.
+ */
+function rewriteStripComments(sql: string): string {
+  const spans = protectedSpans(sql).filter(
+    (s) => sql.startsWith("--", s.start) || sql.startsWith("/*", s.start)
+  );
+  if (spans.length === 0) return sql;
+  let out = "";
+  let cursor = 0;
+  for (const s of spans) {
+    out += sql.slice(cursor, s.start) + " ";
+    cursor = s.end;
+  }
+  return out + sql.slice(cursor);
 }
 
 /**
@@ -1018,9 +1046,10 @@ function rewriteUnaliasedSubqueries(sql: string): string {
       if (!/^\s*(SELECT|VALUES|WITH|FROM)\b/i.test(out.slice(open + 1))) continue;
       const close = matchBracket(out, open, guard);
       if (close === -1) continue;
-      // Already aliased? (AS name, bare name, or name(cols)).
+      // Already aliased? (AS name, bare name, or name(cols)). SELECT/VALUES
+      // after the group is FROM-first tail syntax, not an alias.
       const after = out.slice(close + 1);
-      if (/^\s*(AS\b|[A-Za-z_"]|\()/.test(after) && !/^\s*(WHERE|GROUP|HAVING|WINDOW|QUALIFY|ORDER|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT|USING|ON|JOIN|LEFT|RIGHT|INNER|FULL|CROSS|SEMI|ANTI|ASOF|POSITIONAL|RETURNING|FOR)\b/i.test(after)) {
+      if (/^\s*(AS\b|[A-Za-z_"]|\()/.test(after) && !/^\s*(WHERE|GROUP|HAVING|WINDOW|QUALIFY|ORDER|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT|USING|ON|JOIN|LEFT|RIGHT|INNER|FULL|CROSS|SEMI|ANTI|ASOF|POSITIONAL|RETURNING|FOR|SELECT|VALUES)\b/i.test(after)) {
         continue;
       }
       // `, (` in a FROM list only; a comma inside a select list is depth>0
@@ -1336,13 +1365,33 @@ function rewriteJoins(sql: string): string {
       continue;
     }
 
-    // ON form: wrap the original condition.
+    // ON form: wrap the original condition. The condition ends at the next
+    // clause keyword OR the next join keyword — findClauseEnd alone would
+    // swallow a following `SEMI JOIN ...` into the wrapped parentheses.
     const condStart = cond.index + cond[0].length;
-    const condEnd = findClauseEnd(out, condStart, guard);
+    let condEnd = findClauseEnd(out, condStart, guard);
+    {
+      let depth = 0;
+      for (let i = condStart; i < condEnd; i++) {
+        if (guard(i)) continue;
+        const ch = out[i]!;
+        if (ch === "(" || ch === "[") depth++;
+        else if (ch === ")" || ch === "]") depth--;
+        else if (
+          depth === 0 &&
+          /[A-Za-z]/.test(ch) &&
+          /[\s)]/.test(out[i - 1] ?? " ") &&
+          /^(JOIN|LEFT\s+JOIN|RIGHT\s+JOIN|FULL\s+JOIN|INNER\s+JOIN|CROSS\s+JOIN|NATURAL\s+JOIN|SEMI\s+JOIN|ANTI\s+JOIN|ASOF\s+|POSITIONAL\s+JOIN)/i.test(out.slice(i))
+        ) {
+          condEnd = i;
+          break;
+        }
+      }
+    }
     const orig = out.slice(condStart, condEnd).trim();
     out =
       out.slice(0, m.index) + joinKw + out.slice(afterJoin, cond.index) +
-      `ON ${mark()} AND (${orig})` + out.slice(condEnd);
+      `ON ${mark()} AND (${orig}) ` + out.slice(condEnd);
   }
   return out;
 }
@@ -1742,6 +1791,7 @@ function rewriteAggOrderBy(sql: string): string {
  */
 export function preprocessDuckDb(sql: string): string {
   let out = sql;
+  out = rewriteStripComments(out);
   out = rewriteDollarQuotes(out);
   out = rewriteEqEq(out);
   out = rewriteEmbeddedStatements(out);
@@ -1987,7 +2037,9 @@ export function reviveSentinels(value: unknown, ctx: ReviveContext = {}): unknow
           return ["field", revivedArgs[0]!, constString(revivedArgs[1])];
 
         case SENTINEL.num:
-          return { v: Number(constString(revivedArgs[0])) };
+          // Verbatim, not Number(...): `1.5e-3` typed as DOUBLE must not come
+          // back as the DECIMAL literal 0.0015 — same value, different type.
+          return { __raw: constString(revivedArgs[0]) };
 
         case SENTINEL.map: {
           const pairs: SqlExpr[] = [];
