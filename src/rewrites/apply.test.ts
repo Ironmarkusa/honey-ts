@@ -30,7 +30,7 @@ describe("apply", () => {
     );
     const sql = renderSql(result);
     assert.match(sql, /2025-01-01/);
-    assert.match(sql, /"tenant_id" = 'acme'/);
+    assert.match(sql, /tenant_id = 'acme'/);
     assert.match(sql, /LIMIT 100/);
   });
 
@@ -41,7 +41,7 @@ describe("apply", () => {
       (c) => replaceTable(c, "a", "b"),
       (c) => replaceTable(c, "b", "c")
     );
-    assert.match(renderSql(r1), /FROM "c"/);
+    assert.match(renderSql(r1), /FROM c/);
   });
 });
 

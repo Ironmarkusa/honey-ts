@@ -21,7 +21,7 @@ describe("format", () => {
         select: ["id", "name"],
         from: "users",
       });
-      assert.strictEqual(sql, 'SELECT "id", "name" FROM "users"');
+      assert.strictEqual(sql, 'SELECT id, name FROM users');
       assert.deepStrictEqual(params, []);
     });
 
@@ -31,7 +31,7 @@ describe("format", () => {
         from: "users",
         where: ["=", "id", {$: 1}],
       });
-      assert.strictEqual(sql, 'SELECT * FROM "users" WHERE "id" = $1');
+      assert.strictEqual(sql, 'SELECT * FROM users WHERE id = $1');
       assert.deepStrictEqual(params, [1]);
     });
 
@@ -43,7 +43,7 @@ describe("format", () => {
       });
       assert.strictEqual(
         sql,
-        'SELECT * FROM "users" WHERE ("status" = $1) AND ("age" > $2)'
+        'SELECT * FROM users WHERE (status = $1) AND (age > $2)'
       );
       assert.deepStrictEqual(params, ["active", 18]);
     });
@@ -54,7 +54,7 @@ describe("format", () => {
         from: [["users", "u"]],
         join: [[["orders", "o"], ["=", "u.id", "o.user_id"]]],
       });
-      assert.match(sql, /INNER JOIN "orders" AS "o" ON "u"."id" = "o"."user_id"/);
+      assert.match(sql, /INNER JOIN orders AS o ON u.id = o.user_id/);
     });
 
     it("formats SELECT with ORDER BY, LIMIT, OFFSET", () => {
@@ -65,7 +65,7 @@ describe("format", () => {
         limit: {$: 10},
         offset: {$: 20},
       });
-      assert.match(sql, /ORDER BY "created_at" DESC/);
+      assert.match(sql, /ORDER BY created_at DESC/);
       assert.match(sql, /LIMIT \$1/);
       assert.match(sql, /OFFSET \$2/);
       assert.deepStrictEqual(params, [10, 20]);
@@ -78,7 +78,7 @@ describe("format", () => {
         "insert-into": "users",
         values: [{ name: {$: "Alice"}, email: {$: "alice@example.com"} }],
       });
-      assert.match(sql, /INSERT INTO "users"/);
+      assert.match(sql, /INSERT INTO users/);
       assert.match(sql, /VALUES/);
       assert.deepStrictEqual(params, ["Alice", "alice@example.com"]);
     });
@@ -90,7 +90,7 @@ describe("format", () => {
         "on-conflict": ["id"],
         "do-nothing": true,
       });
-      assert.match(sql, /ON CONFLICT \("id"\) DO NOTHING/);
+      assert.match(sql, /ON CONFLICT \(id\) DO NOTHING/);
     });
 
     it("formats INSERT with ON CONFLICT DO UPDATE", () => {
@@ -100,7 +100,7 @@ describe("format", () => {
         "on-conflict": ["id"],
         "do-update-set": { fields: ["name"] },
       });
-      assert.match(sql, /DO UPDATE SET "name" = EXCLUDED."name"/);
+      assert.match(sql, /DO UPDATE SET name = EXCLUDED.name/);
     });
 
     it("formats INSERT with RETURNING", () => {
@@ -109,7 +109,7 @@ describe("format", () => {
         values: [{ name: {$: "Alice"} }],
         returning: ["id", "created_at"],
       });
-      assert.match(sql, /RETURNING "id", "created_at"/);
+      assert.match(sql, /RETURNING id, created_at/);
     });
 
     it("formats INSERT with column list", () => {
@@ -117,7 +117,7 @@ describe("format", () => {
         "insert-into": ["users", ["name", "email"]],
         values: [[{$: "Alice"}, {$: "alice@example.com"}]],
       });
-      assert.match(sql, /INSERT INTO "users" \("name", "email"\)/);
+      assert.match(sql, /INSERT INTO users \(name, email\)/);
       assert.match(sql, /VALUES \(\$1, \$2\)/);
     });
 
@@ -132,7 +132,7 @@ describe("format", () => {
       const insertPos = sql.indexOf("INSERT INTO");
       const selectPos = sql.indexOf("SELECT");
       assert.ok(insertPos < selectPos, "INSERT INTO should come before SELECT");
-      assert.match(sql, /INSERT INTO "target_table" \("id", "name", "value"\) SELECT/);
+      assert.match(sql, /INSERT INTO target_table \(id, name, value\) SELECT/);
     });
 
     it("formats INSERT...SELECT with JOIN", () => {
@@ -143,10 +143,10 @@ describe("format", () => {
         join: [[["sessions", "s"], ["=", "s.user_id", "u.id"]]],
         where: ["=", "u.active", {$: true}],
       });
-      assert.match(sql, /INSERT INTO "audit_log"/);
-      assert.match(sql, /SELECT "u"."id"/);
-      assert.match(sql, /FROM "users" AS "u"/);
-      assert.match(sql, /JOIN "sessions" AS "s"/);
+      assert.match(sql, /INSERT INTO audit_log/);
+      assert.match(sql, /SELECT u.id/);
+      assert.match(sql, /FROM users AS u/);
+      assert.match(sql, /JOIN sessions AS s/);
     });
 
     it("formats INSERT...SELECT without column list", () => {
@@ -155,7 +155,7 @@ describe("format", () => {
         select: ["*"],
         from: "source_table",
       });
-      assert.match(sql, /INSERT INTO "target_table" SELECT \* FROM "source_table"/);
+      assert.match(sql, /INSERT INTO target_table SELECT \* FROM source_table/);
     });
   });
 
@@ -225,9 +225,9 @@ describe("format", () => {
         },
         { checking: "none" }
       );
-      assert.match(sql, /UPDATE "users" SET/);
-      assert.match(sql, /"name" = \$1/);
-      assert.match(sql, /WHERE "id" = \$\d/);
+      assert.match(sql, /UPDATE users SET/);
+      assert.match(sql, /name = \$1/);
+      assert.match(sql, /WHERE id = \$\d/);
     });
   });
 
@@ -240,7 +240,7 @@ describe("format", () => {
         },
         { checking: "none" }
       );
-      assert.strictEqual(sql, 'DELETE FROM "users" WHERE "id" = $1');
+      assert.strictEqual(sql, 'DELETE FROM users WHERE id = $1');
       assert.deepStrictEqual(params, [1]);
     });
   });
@@ -259,7 +259,7 @@ describe("format", () => {
         select: [["cast", "created_at", "date"]],
         from: "events",
       });
-      assert.match(sql, /CAST\("created_at" AS DATE\)/);
+      assert.match(sql, /CAST\(created_at AS DATE\)/);
     });
 
     it("formats BETWEEN expression", () => {
@@ -268,7 +268,7 @@ describe("format", () => {
         from: "orders",
         where: ["between", "total", {$: 100}, {$: 500}],
       });
-      assert.match(sql, /WHERE "total" BETWEEN \$1 AND \$2/);
+      assert.match(sql, /WHERE total BETWEEN \$1 AND \$2/);
       assert.deepStrictEqual(params, [100, 500]);
     });
 
@@ -278,7 +278,7 @@ describe("format", () => {
         from: "users",
         where: ["in", "id", [{$: 1}, {$: 2}, {$: 3}]],
       });
-      assert.match(sql, /WHERE "id" IN \(\$1, \$2, \$3\)/);
+      assert.match(sql, /WHERE id IN \(\$1, \$2, \$3\)/);
       assert.deepStrictEqual(params, [1, 2, 3]);
     });
 
@@ -299,7 +299,7 @@ describe("format", () => {
         },
         { params: { userId: 42 } }
       );
-      assert.match(sql, /WHERE "id" = \$1/);
+      assert.match(sql, /WHERE id = \$1/);
       assert.deepStrictEqual(params, [42]);
     });
   });
@@ -313,8 +313,8 @@ describe("format", () => {
         select: ["*"],
         from: "active_users",
       });
-      assert.match(sql, /WITH "active_users" AS/);
-      assert.match(sql, /SELECT \* FROM "active_users"/);
+      assert.match(sql, /WITH active_users AS/);
+      assert.match(sql, /SELECT \* FROM active_users/);
     });
   });
 
@@ -326,7 +326,7 @@ describe("format", () => {
           { select: ["id"], from: "admins" },
         ],
       });
-      assert.match(sql, /SELECT "id" FROM "users" UNION SELECT "id" FROM "admins"/);
+      assert.match(sql, /SELECT id FROM users UNION SELECT id FROM admins/);
     });
   });
 
@@ -340,7 +340,7 @@ describe("format", () => {
         },
         { inline: true }
       );
-      assert.strictEqual(sql, 'SELECT * FROM "users" WHERE "id" = 42');
+      assert.strictEqual(sql, 'SELECT * FROM users WHERE id = 42');
       assert.deepStrictEqual(params, []);
     });
 
@@ -353,7 +353,7 @@ describe("format", () => {
         },
         { numbered: false }
       );
-      assert.match(sql, /WHERE "id" = \?/);
+      assert.match(sql, /WHERE id = \?/);
     });
 
     it("transforms null equals to IS NULL", () => {
@@ -365,7 +365,7 @@ describe("format", () => {
         },
         { transformNullEquals: true }
       );
-      assert.match(sql, /WHERE "deleted_at" IS NULL/);
+      assert.match(sql, /WHERE deleted_at IS NULL/);
     });
   });
 });
@@ -378,7 +378,7 @@ describe("PostgreSQL operators", () => {
         select: [["->", "data", {$: "name"}]],
         from: "users",
       });
-      assert.match(sql, /SELECT "data" -> \$1 FROM "users"/);
+      assert.match(sql, /SELECT data -> \$1 FROM users/);
     });
   });
 });
@@ -390,7 +390,7 @@ describe("Typed values", () => {
       from: "users",
       where: ["=", "name", {$: "Alice"}],
     });
-    assert.strictEqual(sql, 'SELECT * FROM "users" WHERE "name" = $1');
+    assert.strictEqual(sql, 'SELECT * FROM users WHERE name = $1');
     assert.deepStrictEqual(params, ["Alice"]);
   });
 
@@ -413,7 +413,7 @@ describe("Typed values", () => {
       },
       { inline: true }
     );
-    assert.strictEqual(sql, 'SELECT * FROM "users" WHERE "id" = 42');
+    assert.strictEqual(sql, 'SELECT * FROM users WHERE id = 42');
   });
 
   it("formats inline typed values with cast", () => {
@@ -439,7 +439,7 @@ describe("PostgreSQL infix operators", () => {
       from: "users",
       where: ["~*", "name", { $: "^john" }],
     });
-    assert.match(sql, /"name" ~\* \$1/);
+    assert.match(sql, /name ~\* \$1/);
   });
 
   it("formats ~ as infix operator", () => {
@@ -448,7 +448,7 @@ describe("PostgreSQL infix operators", () => {
       from: "users",
       where: ["~", "email", { $: "^[a-z]+@" }],
     });
-    assert.match(sql, /"email" ~ \$1/);
+    assert.match(sql, /email ~ \$1/);
   });
 
   it("formats JSON operators as infix", () => {
@@ -456,7 +456,7 @@ describe("PostgreSQL infix operators", () => {
       select: [["->", "data", { $: "name" }]],
       from: "users",
     });
-    assert.match(sql, /"data" -> \$1/);
+    assert.match(sql, /data -> \$1/);
   });
 
   it("formats ->> as infix operator", () => {
@@ -464,7 +464,7 @@ describe("PostgreSQL infix operators", () => {
       select: [["->>", "data", { $: "email" }]],
       from: "users",
     });
-    assert.match(sql, /"data" ->> \$1/);
+    assert.match(sql, /data ->> \$1/);
   });
 
   it("formats @> as infix operator", () => {
@@ -473,7 +473,7 @@ describe("PostgreSQL infix operators", () => {
       from: "users",
       where: ["@>", "tags", { $: ["admin"] }],
     });
-    assert.match(sql, /"tags" @> \$1/);
+    assert.match(sql, /tags @> \$1/);
   });
 
   it("formats && (array overlap) as infix operator", () => {
@@ -482,7 +482,7 @@ describe("PostgreSQL infix operators", () => {
       from: "posts",
       where: ["&&", "tags", ["array", { $: "sql" }, { $: "typescript" }]],
     });
-    assert.match(sql, /"tags" && ARRAY\[\$1, \$2\]/);
+    assert.match(sql, /tags && ARRAY\[\$1, \$2\]/);
   });
 
   it("formats @@ (text search) as infix operator", () => {
@@ -491,7 +491,7 @@ describe("PostgreSQL infix operators", () => {
       from: "articles",
       where: ["@@", "search_vector", ["%to_tsquery", { $: "hello & world" }]],
     });
-    assert.match(sql, /"search_vector" @@ TO_TSQUERY\(\$1\)/);
+    assert.match(sql, /search_vector @@ TO_TSQUERY\(\$1\)/);
   });
 
   it("handles CASE with regex operators", () => {
@@ -508,9 +508,9 @@ describe("PostgreSQL infix operators", () => {
       ],
       from: "leads",
     }, { inline: true });
-    assert.match(sql, /CASE WHEN "source" ~\* 'facebook\|fb' THEN 'facebook'/);
-    assert.match(sql, /WHEN "source" ~\* 'google' THEN 'google'/);
-    assert.match(sql, /ELSE 'other' END AS "platform"/);
+    assert.match(sql, /CASE WHEN source ~\* 'facebook\|fb' THEN 'facebook'/);
+    assert.match(sql, /WHEN source ~\* 'google' THEN 'google'/);
+    assert.match(sql, /ELSE 'other' END AS platform/);
   });
 });
 
@@ -520,7 +520,7 @@ describe("Literal values", () => {
       select: [["->", "data", { v: "name" }]],
       from: "users",
     });
-    assert.strictEqual(sql, `SELECT "data" -> 'name' FROM "users"`);
+    assert.strictEqual(sql, `SELECT data -> 'name' FROM users`);
     assert.deepStrictEqual(params, []);
   });
 
@@ -540,7 +540,7 @@ describe("Literal values", () => {
       from: "users",
       where: ["=", "active", { v: true }],
     });
-    assert.match(sql, /WHERE "active" = TRUE/);
+    assert.match(sql, /WHERE active = TRUE/);
     assert.deepStrictEqual(params, []);
   });
 
@@ -550,7 +550,7 @@ describe("Literal values", () => {
       from: "users",
       where: ["is", "deleted_at", { v: null }],
     });
-    assert.match(sql, /WHERE "deleted_at" IS NULL/);
+    assert.match(sql, /WHERE deleted_at IS NULL/);
     assert.deepStrictEqual(params, []);
   });
 
@@ -560,7 +560,7 @@ describe("Literal values", () => {
       from: "users",
       where: ["=", "name", { v: "Alice" }],
     }, { numbered: false });
-    assert.strictEqual(sql, `SELECT * FROM "users" WHERE "name" = 'Alice'`);
+    assert.strictEqual(sql, `SELECT * FROM users WHERE name = 'Alice'`);
     assert.deepStrictEqual(params, []);
   });
 
@@ -570,7 +570,7 @@ describe("Literal values", () => {
       from: "users",
       where: ["=", "id", { v: 42 }],
     }, { inline: true });
-    assert.strictEqual(sql, 'SELECT * FROM "users" WHERE "id" = 42');
+    assert.strictEqual(sql, 'SELECT * FROM users WHERE id = 42');
     assert.deepStrictEqual(params, []);
   });
 
@@ -580,7 +580,7 @@ describe("Literal values", () => {
       from: "users",
       where: ["=", "name", { $: "Alice" }],
     });
-    assert.strictEqual(sql, `SELECT JSONB_BUILD_OBJECT('key', "col") FROM "users" WHERE "name" = $1`);
+    assert.strictEqual(sql, `SELECT JSONB_BUILD_OBJECT('key', col) FROM users WHERE name = $1`);
     assert.deepStrictEqual(params, ["Alice"]);
   });
 });

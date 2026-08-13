@@ -118,6 +118,40 @@ const secured = modify.addWhere(clause, ["=", "tenant_id", $(tenantId)]);
 const [sql, ...params] = format(secured);
 ```
 
+### The `sql` Tagged Template
+
+When a condition is easier to write as SQL than as arrays, use the `sql` tag.
+Literal text passes through as SQL; every `${}` interpolation becomes a bound
+parameter — injection-safe by construction, because data can never cross into
+the SQL text:
+
+```typescript
+import { sql, modify, $ } from 'honey-ts';
+
+const clause = {
+  select: ["*"], from: "users",
+  where: sql`status = ${status} AND created_at > ${since}`,
+};
+// ... WHERE status = $1 AND created_at > $2
+```
+
+Fragments compose — nest them, and parameter numbering just works:
+
+```typescript
+const tenant = sql`tenant_id = ${tenantId}`;
+where: sql`${tenant} AND total > ${100}`
+// WHERE tenant_id = $1 AND total > $2
+```
+
+Honey constructs splice as SQL instead of binding: `ident()` for exotic
+column names, clause maps for subqueries, nested `sql` fragments, expression
+arrays. Plain data (strings, numbers, Dates, JSON payload objects) always
+binds; for an array-valued *parameter* be explicit with `${$([1,2,3])}`.
+
+Trade-off to know: a `sql` fragment is opaque to the manipulation layer —
+`find`/`rewrite` can't see inside it. Use clause maps for anything you'll
+rewrite programmatically.
+
 ## DuckDB Dialect
 
 honey-ts speaks DuckDB as a first-class dialect — parsing, emitting, and typed
@@ -224,20 +258,26 @@ null              // => NULL
 
 ### Identifier Quoting
 
-By default every identifier is quoted — exact semantics, immune to reserved
-words, case folding, and injection through identifier position:
+By default identifiers are quoted **only when necessary** — bare lowercase
+names stay bare; reserved words, mixed case, and special characters are quoted
+(quoting there is what preserves your meaning):
 
 ```typescript
-format({ select: ["id"], from: "users" });
-// SELECT "id" FROM "users"
+format({ select: ["id", "select", "createdAt"], from: "users" });
+// SELECT id, "select", "createdAt" FROM users
 ```
 
-Pass `quoted: false` for quote-only-when-necessary output (reserved words,
-mixed case, and special characters stay quoted — bare lowercase names don't):
+The rules: `select` is a reserved word (bare would be a syntax error), and a
+bare `createdAt` would silently fold to `createdat` in PostgreSQL — so both
+stay quoted. Everything else reads like the SQL you'd write by hand. The
+reserved-word list covers PostgreSQL ∪ DuckDB and is pinned against DuckDB's
+own `duckdb_keywords()` catalog in CI.
+
+Pass `quoted: true` to force-quote every identifier (exact-name semantics):
 
 ```typescript
-format({ select: ["id", "select", "createdAt"], from: "users" }, { quoted: false });
-// SELECT id, "select", "createdAt" FROM users
+format({ select: ["id"], from: "users" }, { quoted: true });
+// SELECT "id" FROM "users"
 ```
 
 Two rules worth knowing:

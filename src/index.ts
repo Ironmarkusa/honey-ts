@@ -46,7 +46,7 @@ export type { FromSqlOptions } from "./parser.js";
 // 2. Value constructors
 // ============================================================================
 
-export { $, raw, param, lift, literal, ident, mapEquals } from "./sql.js";
+export { $, raw, param, lift, literal, ident, sql, mapEquals } from "./sql.js";
 
 // ============================================================================
 // 3. Manipulation — matcher-based, immutable, subquery-aware

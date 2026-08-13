@@ -45,49 +45,49 @@ describe("DuckDB dialect: operator lowerings", () => {
   test("~* lowers to regexp_matches with an 'i' flag", async () => {
     await emits(
       sel(["~*", "email", { v: "^a" }]),
-      `SELECT REGEXP_MATCHES("email", '^a', 'i') FROM "t"`
+      `SELECT REGEXP_MATCHES(email, '^a', 'i') FROM t`
     );
   });
 
   test("!~* lowers to a negated regexp_matches", async () => {
     await emits(
       sel(["!~*", "email", { v: "^a" }]),
-      `SELECT NOT REGEXP_MATCHES("email", '^a', 'i') FROM "t"`
+      `SELECT NOT REGEXP_MATCHES(email, '^a', 'i') FROM t`
     );
   });
 
   test("#> lowers to json_extract", async () => {
     await emits(
       sel(["#>", "data", { v: "$.a.b" }]),
-      `SELECT JSON_EXTRACT("data", '$.a.b') FROM "t"`
+      `SELECT JSON_EXTRACT(data, '$.a.b') FROM t`
     );
   });
 
   test("#>> lowers to json_extract_string", async () => {
     await emits(
       sel(["#>>", "data", { v: "$.a.b" }]),
-      `SELECT JSON_EXTRACT_STRING("data", '$.a.b') FROM "t"`
+      `SELECT JSON_EXTRACT_STRING(data, '$.a.b') FROM t`
     );
   });
 
   test("? lowers to json_exists", async () => {
     await emits(
       sel(["?", "data", { v: "$.a" }]),
-      `SELECT JSON_EXISTS("data", '$.a') FROM "t"`
+      `SELECT JSON_EXISTS(data, '$.a') FROM t`
     );
   });
 
   test("@? lowers to json_exists", async () => {
     await emits(
       sel(["@?", "data", { v: "$.a" }]),
-      `SELECT JSON_EXISTS("data", '$.a') FROM "t"`
+      `SELECT JSON_EXISTS(data, '$.a') FROM t`
     );
   });
 
   test("@> lowers to json_contains", async () => {
     await emits(
       sel(["@>", "data", { v: '{"a":1}' }]),
-      `SELECT JSON_CONTAINS("data", '{"a":1}') FROM "t"`
+      `SELECT JSON_CONTAINS(data, '{"a":1}') FROM t`
     );
   });
 
@@ -95,25 +95,25 @@ describe("DuckDB dialect: operator lowerings", () => {
     // a <@ b means "a is contained in b", i.e. json_contains(b, a).
     await emits(
       sel(["<@", "data", { v: '{"a":1}' }]),
-      `SELECT JSON_CONTAINS('{"a":1}', "data") FROM "t"`
+      `SELECT JSON_CONTAINS('{"a":1}', data) FROM t`
     );
   });
 
   test("lowerings do not leak into the postgres dialect", () => {
     assert.equal(
       pg(sel(["~*", "email", { v: "^a" }])),
-      `SELECT "email" ~* '^a' FROM "t"`
+      `SELECT email ~* '^a' FROM t`
     );
     assert.equal(
       pg(sel(["@>", "data", { v: '{"a":1}' }])),
-      `SELECT "data" @> '{"a":1}' FROM "t"`
+      `SELECT data @> '{"a":1}' FROM t`
     );
   });
 
   test("operators DuckDB shares with postgres are left alone", async () => {
-    await emits(sel(["~", "email", { v: "^a" }]), `SELECT "email" ~ '^a' FROM "t"`);
-    await emits(sel(["||", "a", "b"]), `SELECT "a" || "b" FROM "t"`);
-    await emits(sel(["ilike", "a", { v: "x%" }]), `SELECT "a" ILIKE 'x%' FROM "t"`);
+    await emits(sel(["~", "email", { v: "^a" }]), `SELECT email ~ '^a' FROM t`);
+    await emits(sel(["||", "a", "b"]), `SELECT a || b FROM t`);
+    await emits(sel(["ilike", "a", { v: "x%" }]), `SELECT a ILIKE 'x%' FROM t`);
   });
 });
 
@@ -155,7 +155,7 @@ describe("DuckDB dialect: unsupported operators", () => {
 // ===========================================================================
 describe("DuckDB dialect: type mapping", () => {
   test("jsonb maps to JSON in casts", async () => {
-    await emits({ select: [["cast", "a", "jsonb"]] }, `SELECT CAST("a" AS JSON)`);
+    await emits({ select: [["cast", "a", "jsonb"]] }, `SELECT CAST(a AS JSON)`);
   });
 
   test("jsonb maps to JSON in typed values", () => {
@@ -166,7 +166,7 @@ describe("DuckDB dialect: type mapping", () => {
   });
 
   test("postgres keeps jsonb", () => {
-    assert.equal(pg({ select: [["cast", "a", "jsonb"]] }), `SELECT CAST("a" AS JSONB)`);
+    assert.equal(pg({ select: [["cast", "a", "jsonb"]] }), `SELECT CAST(a AS JSONB)`);
   });
 
   test("cast precision and scale survive the type mapping", async () => {
@@ -174,17 +174,17 @@ describe("DuckDB dialect: type mapping", () => {
     // alias table must not start rewriting parameterised types.
     await emits(
       { select: [["cast", "a", "numeric(7,4)"]] },
-      `SELECT CAST("a" AS NUMERIC(7,4))`
+      `SELECT CAST(a AS NUMERIC(7,4))`
     );
     await emits(
       { select: [["cast", "a", "decimal(18,2)"]] },
-      `SELECT CAST("a" AS DECIMAL(18,2))`
+      `SELECT CAST(a AS DECIMAL(18,2))`
     );
   });
 
   test("unmapped types pass through untouched", async () => {
-    await emits({ select: [["cast", "a", "varchar"]] }, `SELECT CAST("a" AS VARCHAR)`);
-    await emits({ select: [["cast", "a", "timestamptz"]] }, `SELECT CAST("a" AS TIMESTAMPTZ)`);
+    await emits({ select: [["cast", "a", "varchar"]] }, `SELECT CAST(a AS VARCHAR)`);
+    await emits({ select: [["cast", "a", "timestamptz"]] }, `SELECT CAST(a AS TIMESTAMPTZ)`);
   });
 });
 
@@ -198,7 +198,7 @@ describe("DuckDB dialect: QUALIFY", () => {
         qualify: ["=", ["%row_number"], { v: 1 }],
         "order-by": ["a"],
       },
-      `SELECT "a" FROM "t" QUALIFY ROW_NUMBER() = 1 ORDER BY "a"`
+      `SELECT a FROM t QUALIFY ROW_NUMBER() = 1 ORDER BY a`
     );
   });
 
@@ -220,28 +220,28 @@ describe("DuckDB dialect: star modifiers", () => {
   test("EXCLUDE", async () => {
     await emits(
       { select: [["star", { exclude: ["id"] }]], from: ["t"] },
-      `SELECT * EXCLUDE ("id") FROM "t"`
+      `SELECT * EXCLUDE (id) FROM t`
     );
   });
 
   test("EXCLUDE with several columns", async () => {
     await emits(
       { select: [["star", { exclude: ["id", "secret"] }]], from: ["t"] },
-      `SELECT * EXCLUDE ("id", "secret") FROM "t"`
+      `SELECT * EXCLUDE (id, secret) FROM t`
     );
   });
 
   test("table-qualified star", async () => {
     await emits(
       { select: [["star", { table: "t", exclude: ["id"] }]], from: ["t"] },
-      `SELECT "t".* EXCLUDE ("id") FROM "t"`
+      `SELECT t.* EXCLUDE (id) FROM t`
     );
   });
 
   test("REPLACE", async () => {
     await emits(
       { select: [["star", { replace: [[["%lower", "name"], "name"]] }]], from: ["t"] },
-      `SELECT * REPLACE (LOWER("name") AS "name") FROM "t"`
+      `SELECT * REPLACE (LOWER(name) AS name) FROM t`
     );
   });
 
@@ -251,12 +251,12 @@ describe("DuckDB dialect: star modifiers", () => {
         select: [["star", { exclude: ["id"], replace: [[["%lower", "name"], "name"]] }]],
         from: ["t"],
       },
-      `SELECT * EXCLUDE ("id") REPLACE (LOWER("name") AS "name") FROM "t"`
+      `SELECT * EXCLUDE (id) REPLACE (LOWER(name) AS name) FROM t`
     );
   });
 
   test("bare star spec is just *", async () => {
-    await emits({ select: [["star", {}]], from: ["t"] }, `SELECT * FROM "t"`);
+    await emits({ select: [["star", {}]], from: ["t"] }, `SELECT * FROM t`);
   });
 
   test("refuses to emit on postgres", () => {
@@ -303,7 +303,7 @@ describe("DuckDB dialect: list, struct and lambda literals", () => {
       {
         select: [["%list_transform", ["list", { v: 1 }, { v: 2 }], ["lambda", "x", ["+", "x", { v: 1 }]]]],
       },
-      `SELECT LIST_TRANSFORM([1, 2], "x" -> "x" + 1)`
+      `SELECT LIST_TRANSFORM([1, 2], x -> x + 1)`
     );
   });
 
@@ -312,7 +312,7 @@ describe("DuckDB dialect: list, struct and lambda literals", () => {
       {
         select: [["%list_zip", ["list", { v: 1 }], ["lambda", ["x", "y"], ["+", "x", "y"]]]],
       },
-      `SELECT LIST_ZIP([1], ("x", "y") -> "x" + "y")`
+      `SELECT LIST_ZIP([1], (x, y) -> x + y)`
     );
   });
 

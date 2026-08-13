@@ -213,9 +213,11 @@ function createContext(opts: FormatOptions): FormatContext {
   return {
     dialect,
     options: {
-      // Default: always quote. Exact identifier semantics, immune to reserved
-      // words and case folding. `quoted: false` = quote only when necessary.
-      quoted: opts.quoted ?? true,
+      // Default: quote only when necessary — bare lowercase identifiers stay
+      // bare; reserved words, mixed case, and special characters are quoted
+      // (identical semantics, readable output). `quoted: true` forces quoting
+      // every identifier.
+      quoted: opts.quoted ?? false,
       quotedSnake: opts.quotedSnake ?? false,
       quotedAlways: opts.quotedAlways,
       inline: opts.inline ?? false,
@@ -305,7 +307,7 @@ const unquotedSafe = /^[a-z_][a-z0-9_]*$/;
  * generated catalog so an engine upgrade cannot silently under-quote).
  * Over-quoting is harmless; under-quoting a reserved word breaks the SQL.
  */
-const RESERVED_WORDS = new Set([
+export const RESERVED_WORDS = new Set([
   // Shared / PostgreSQL reserved
   "all", "analyse", "analyze", "and", "any", "array", "as", "asc",
   "asymmetric", "authorization", "binary", "both", "case", "cast", "check",
@@ -335,12 +337,19 @@ export function formatEntity(
   const { dialect, options } = ctx;
   const { quoted, quotedSnake, quotedAlways } = options;
 
-  // Handle {ident: [...]} qualified identifier format (preserves dots in names)
+  // Handle {ident: [...]} qualified identifier format (preserves dots in
+  // names). Parts follow the same quoting mode as plain strings — bare when
+  // that cannot change meaning, quoted otherwise — so parsed queries (whose
+  // qualified columns arrive as {ident}) emit in one consistent style.
   if (typeof e === "object" && e !== null && "ident" in e && Array.isArray((e as { ident: string[] }).ident)) {
     const identParts = (e as { ident: string[] }).ident;
     return identParts.map((part) => {
       if (part === "*") return part;
-      return dialect.quote(quotedSnake ? nameUnderscore(part) : part);
+      const name = quotedSnake ? nameUnderscore(part) : part;
+      if (!quoted && unquotedSafe.test(name) && !RESERVED_WORDS.has(name) && !quotedAlways?.test(name)) {
+        return name;
+      }
+      return dialect.quote(name);
     }).join(".");
   }
 
@@ -2301,6 +2310,76 @@ export function $(value: unknown): SqlExpr {
  */
 export function ident(...parts: string[]): SqlExpr {
   return { ident: parts };
+}
+
+/**
+ * Tagged template for SQL fragments — the one place JavaScript preserves
+ * quote style. Literal text passes through as raw SQL; every interpolation
+ * becomes a bound parameter, so the fragment is injection-safe by
+ * construction:
+ *
+ * ```ts
+ * const clause = {
+ *   select: ["*"],
+ *   from: "users",
+ *   where: sql`status = ${status} AND created_at > ${since}`,
+ * };
+ * // ... WHERE status = $1 AND created_at > $2
+ * ```
+ *
+ * Interpolated honey constructs are spliced as expressions rather than bound:
+ * `SqlExpr` arrays, clause maps (subqueries), and the constructor shapes
+ * (`ident()`, `raw()`, `literal()`, `$()`, `param()`, `lift()`), including
+ * nested sql`` fragments:
+ *
+ * ```ts
+ * sql`${ident("user name")} = ${name}`          // "user name" = $1
+ * sql`id IN ${ { select: ["id"], from: "t" } }` // id IN (SELECT id FROM t)
+ * ```
+ *
+ * Disambiguation rules for interpolations:
+ * - primitives, Date, and plain objects (e.g. a JSONB payload) → parameter
+ * - arrays → expression; for an ARRAY-valued parameter, be explicit: `${$([1,2,3])}`
+ */
+export function sql(strings: TemplateStringsArray, ...values: unknown[]): SqlExpr {
+  const parts: (string | SqlExpr)[] = [];
+  for (let i = 0; i < strings.length; i++) {
+    if (strings[i]) parts.push(strings[i]!);
+    if (i < values.length) parts.push(embedTemplateValue(values[i]));
+  }
+  return { __raw: parts };
+}
+
+/** Clause keys that identify an interpolated object as a subquery. */
+const STATEMENT_KEYS = [
+  "select", "select-distinct", "select-distinct-on", "from", "union",
+  "union-all", "intersect", "except", "with", "insert-into", "update",
+  "delete-from", "values", "pivot", "unpivot", "describe",
+] as const;
+
+/** How one sql`` interpolation is embedded: expression or bound parameter. */
+function embedTemplateValue(value: unknown): SqlExpr {
+  // Recognized honey shapes and expression arrays splice as SQL.
+  if (Array.isArray(value)) return value as SqlExpr;
+  if (typeof value === "object" && value !== null && !(value instanceof Date)) {
+    if (
+      isRaw(value) ||
+      isParam(value) ||
+      isLift(value) ||
+      isLiteral(value) ||
+      "$" in (value as object) ||
+      "ident" in (value as object) ||
+      // A clause map splices as a subquery — but only when it actually looks
+      // like a statement. A plain data object (a JSONB payload with arbitrary
+      // keys) must stay a parameter; isClause() alone is a catch-all that
+      // would swallow it.
+      (isClause(value) && STATEMENT_KEYS.some((k) => k in (value as object)))
+    ) {
+      return value as SqlExpr;
+    }
+  }
+  // Everything else — primitives, Date, plain data objects — is a parameter.
+  return { $: value } as SqlExpr;
 }
 
 /**

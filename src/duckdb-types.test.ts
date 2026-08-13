@@ -28,37 +28,37 @@ describe("DuckDB typed constructors emit valid SQL", () => {
     [
       "lambda in list_transform",
       { select: [["%list_transform", d.list({ v: 1 }), d.lambda("x", ["+", "x", { v: 1 }])]] },
-      `SELECT LIST_TRANSFORM([1], "x" -> "x" + 1)`,
+      `SELECT LIST_TRANSFORM([1], x -> x + 1)`,
     ],
     [
       "star",
       { select: [d.star({ exclude: ["id"] })], from: ["t"] },
-      `SELECT * EXCLUDE ("id") FROM "t"`,
+      `SELECT * EXCLUDE (id) FROM t`,
     ],
     [
       "slice",
       { select: [d.slice("a", { v: 1 }, { v: 2 })], from: ["t"] },
-      `SELECT "a"[1:2] FROM "t"`,
+      `SELECT a[1:2] FROM t`,
     ],
     [
       "open slice",
       { select: [d.slice("a", { v: 2 })], from: ["t"] },
-      `SELECT "a"[2:] FROM "t"`,
+      `SELECT a[2:] FROM t`,
     ],
     [
       "named arg",
       { select: [["%histogram", "i", d.namedArg("bin_count", { v: 10 })]], from: ["t"] },
-      `SELECT HISTOGRAM("i", "bin_count" := 10) FROM "t"`,
+      `SELECT HISTOGRAM(i, bin_count := 10) FROM t`,
     ],
     [
       "try-cast",
       { select: [d.tryCast("a", "INT")], from: ["t"] },
-      `SELECT TRY_CAST("a" AS INT) FROM "t"`,
+      `SELECT TRY_CAST(a AS INT) FROM t`,
     ],
     [
       "agg order by",
       { select: [d.aggOrderBy(["%list", "v"], [["v", "desc"]])], from: ["t"] },
-      `SELECT LIST("v" ORDER BY "v" DESC) FROM "t"`,
+      `SELECT LIST(v ORDER BY v DESC) FROM t`,
     ],
   ];
 

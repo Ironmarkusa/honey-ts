@@ -126,7 +126,10 @@ describe("rewriteDateRange properties", () => {
           const sql = render(result);
           // Extra filter should still be there
           assert.ok(
-            sql.includes(`"${extraCol}" = '${extraVal}'`),
+            // Bare in smart-quoting mode unless the generated name happens to
+            // be a reserved word.
+            sql.includes(`${extraCol} = '${extraVal}'`) ||
+              sql.includes(`"${extraCol}" = '${extraVal}'`),
             `expected extra filter preserved in: ${sql}`
           );
         }

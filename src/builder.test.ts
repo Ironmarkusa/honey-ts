@@ -430,13 +430,13 @@ describe("QueryBuilder", () => {
 
       // SQL has quoted identifiers
       assert.match(sql, /SELECT/i);
-      assert.match(sql, /"u"\."email"/);
-      assert.match(sql, /LOWER\("u"\."name"\) AS "name_lower"/i);
-      assert.match(sql, /FROM "users"/i);
-      assert.match(sql, /LEFT JOIN "orders" AS "o"/i);
-      assert.match(sql, /WHERE "u"\."status" = \$1/i);
-      assert.match(sql, /GROUP BY "u"\."id", "u"\."email", "u"\."name"/i);
-      assert.match(sql, /ORDER BY "order_count" DESC/i);
+      assert.match(sql, /u\.email/);
+      assert.match(sql, /LOWER\(u\.name\) AS name_lower/i);
+      assert.match(sql, /FROM users/i);
+      assert.match(sql, /LEFT JOIN orders AS o/i);
+      assert.match(sql, /WHERE u\.status = \$1/i);
+      assert.match(sql, /GROUP BY u\.id, u\.email, u\.name/i);
+      assert.match(sql, /ORDER BY order_count DESC/i);
       assert.match(sql, /LIMIT \$2/i);
       assert.deepEqual(params, ["active", 10]);
     });

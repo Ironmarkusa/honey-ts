@@ -398,7 +398,7 @@ describe("DuckDB generative: dialect isolation", () => {
   });
 
   test("a column in both EXCLUDE and REPLACE is refused", () => {
-    // DuckDB: 'Column "x" cannot occur in both EXCLUDE and REPLACE list'.
+    // DuckDB: 'Column x cannot occur in both EXCLUDE and REPLACE list'.
     // Found by this suite before the emitter checked for it.
     fc.assert(
       fc.property(ident, fc.uniqueArray(ident, { minLength: 0, maxLength: 2 }), (col, others) => {

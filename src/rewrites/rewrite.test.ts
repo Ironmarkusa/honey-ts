@@ -132,17 +132,17 @@ describe("replaceTable", () => {
     const clause = fromSql("SELECT * FROM users WHERE id = 1");
     const result = replaceTable(clause, "users", "members");
     const sql = renderSql(result);
-    assert.match(sql, /FROM "members"/);
-    assert.doesNotMatch(sql, /"users"/);
+    assert.match(sql, /FROM members/);
+    assert.doesNotMatch(sql, /users/);
   });
 
   it("preserves aliases", () => {
     const clause = fromSql("SELECT u.email FROM users u WHERE u.id = 1");
     const result = replaceTable(clause, "users", "members");
     const sql = renderSql(result);
-    assert.match(sql, /FROM "members" AS "u"/);
-    assert.match(sql, /"u"\."email"/);
-    assert.match(sql, /"u"\."id"/);
+    assert.match(sql, /FROM members AS u/);
+    assert.match(sql, /u\.email/);
+    assert.match(sql, /u\.id/);
   });
 
   it("renames in JOIN target", () => {
@@ -151,15 +151,15 @@ describe("replaceTable", () => {
     );
     const result = replaceTable(clause, "users", "members");
     const sql = renderSql(result);
-    assert.match(sql, /JOIN "members"/);
-    assert.match(sql, /"members"\."id"/);
+    assert.match(sql, /JOIN members/);
+    assert.match(sql, /members\.id/);
   });
 
   it("rewrites qualified column refs not using alias", () => {
     const clause = fromSql("SELECT users.email FROM users");
     const result = replaceTable(clause, "users", "members");
     const sql = renderSql(result);
-    assert.match(sql, /"members"\."email"/);
+    assert.match(sql, /members\.email/);
   });
 });
 
@@ -171,8 +171,8 @@ describe("replaceColumn", () => {
       to: "contact_email",
     });
     const sql = renderSql(result);
-    assert.match(sql, /"contact_email"/);
-    assert.doesNotMatch(sql, /"email"/);
+    assert.match(sql, /contact_email/);
+    assert.doesNotMatch(sql, /\bemail\b/);
   });
 
   it("renames a qualified column with the actual table name", () => {
@@ -182,10 +182,10 @@ describe("replaceColumn", () => {
       to: "users.contact_email",
     });
     const sql = renderSql(result);
-    assert.match(sql, /"users"\."contact_email"/);
-    assert.doesNotMatch(sql, /"users"\."email"/);
+    assert.match(sql, /users\.contact_email/);
+    assert.doesNotMatch(sql, /users\.email/);
     // id should be untouched
-    assert.match(sql, /"users"\."id"/);
+    assert.match(sql, /users\.id/);
   });
 
   it("renames column through an alias (alias→table resolution)", () => {
@@ -197,9 +197,9 @@ describe("replaceColumn", () => {
       to: "users.contact_email",
     });
     const sql = renderSql(result);
-    assert.match(sql, /"u"\."contact_email"/);
-    assert.doesNotMatch(sql, /"u"\."email"/);
-    assert.match(sql, /"u"\."id"/);
+    assert.match(sql, /u\.contact_email/);
+    assert.doesNotMatch(sql, /u\.email/);
+    assert.match(sql, /u\.id/);
   });
 
   it("does not touch a same-named column from another table", () => {
@@ -211,8 +211,8 @@ describe("replaceColumn", () => {
       to: "users.contact_email",
     });
     const sql = renderSql(result);
-    assert.match(sql, /"u"\."contact_email"/);
-    assert.match(sql, /"o"\."email"/); // unchanged
+    assert.match(sql, /u\.contact_email/);
+    assert.match(sql, /o\.email/); // unchanged
   });
 });
 
@@ -244,8 +244,8 @@ describe("round-trip invariance", () => {
     const result = replaceWhere(clause, dateRange("d"), [">=", "d", { $: "2025-01-01" }]);
     const sql = renderSql(result);
     // "a = 1" and "b = 2" predicates should survive intact
-    assert.match(sql, /"a" = 1/);
-    assert.match(sql, /"b" = 2/);
+    assert.match(sql, /a = 1/);
+    assert.match(sql, /b = 2/);
   });
 
   it("replaceColumn round-trips cleanly (parse → rewrite → format → parse)", () => {

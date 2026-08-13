@@ -50,11 +50,11 @@ describe("DuckDB preprocessor: list literals", () => {
   });
 
   test("subscripting is not rewritten as a literal", async () => {
-    await roundTrips("SELECT a[1] FROM t", `SELECT "a"[1] FROM "t"`);
+    await roundTrips("SELECT a[1] FROM t", `SELECT a[1] FROM t`);
   });
 
   test("string-keyed subscripting", async () => {
-    await roundTrips("SELECT col['key'] FROM t", `SELECT "col"['key'] FROM "t"`);
+    await roundTrips("SELECT col['key'] FROM t", `SELECT col['key'] FROM t`);
   });
 
   test("brackets inside string literals are untouched", () => {
@@ -100,40 +100,40 @@ describe("DuckDB preprocessor: struct literals", () => {
 // ===========================================================================
 describe("DuckDB preprocessor: list slicing", () => {
   test("bounded slice", async () => {
-    await roundTrips("SELECT a[1:2] FROM t", `SELECT "a"[1:2] FROM "t"`);
+    await roundTrips("SELECT a[1:2] FROM t", `SELECT a[1:2] FROM t`);
   });
 
   test("open upper bound", async () => {
-    await roundTrips("SELECT a[2:] FROM t", `SELECT "a"[2:] FROM "t"`);
+    await roundTrips("SELECT a[2:] FROM t", `SELECT a[2:] FROM t`);
   });
 
   test("open lower bound", async () => {
-    await roundTrips("SELECT a[:3] FROM t", `SELECT "a"[:3] FROM "t"`);
+    await roundTrips("SELECT a[:3] FROM t", `SELECT a[:3] FROM t`);
   });
 });
 
 // ===========================================================================
 describe("DuckDB preprocessor: TRY_CAST", () => {
   test("basic", async () => {
-    await roundTrips("SELECT TRY_CAST(a AS INT) FROM t", `SELECT TRY_CAST("a" AS INT) FROM "t"`);
+    await roundTrips("SELECT TRY_CAST(a AS INT) FROM t", `SELECT TRY_CAST(a AS INT) FROM t`);
   });
 
   test("preserves precision", async () => {
     await roundTrips(
       "SELECT TRY_CAST(a AS DECIMAL(7,4)) FROM t",
-      `SELECT TRY_CAST("a" AS DECIMAL(7,4)) FROM "t"`
+      `SELECT TRY_CAST(a AS DECIMAL(7,4)) FROM t`
     );
   });
 
   test("plain CAST is unaffected", async () => {
-    await roundTrips("SELECT CAST(a AS INT) FROM t", `SELECT CAST("a" AS INT) FROM "t"`);
+    await roundTrips("SELECT CAST(a AS INT) FROM t", `SELECT CAST(a AS INT) FROM t`);
   });
 });
 
 // ===========================================================================
 describe("DuckDB preprocessor: aggregate ORDER BY", () => {
   test("single ordering column", async () => {
-    await roundTrips("SELECT list(v ORDER BY v) FROM t", `SELECT LIST("v" ORDER BY "v" ASC) FROM "t"`);
+    await roundTrips("SELECT list(v ORDER BY v) FROM t", `SELECT LIST(v ORDER BY v ASC) FROM t`);
   });
 
   test("descending", async () => {
@@ -171,11 +171,11 @@ describe("DuckDB preprocessor: GROUP BY / ORDER BY ALL", () => {
 // ===========================================================================
 describe("DuckDB preprocessor: FROM-first syntax", () => {
   test("FROM t SELECT a", async () => {
-    await roundTrips("FROM t SELECT a", `SELECT "a" FROM "t"`);
+    await roundTrips("FROM t SELECT a", `SELECT a FROM t`);
   });
 
   test("bare FROM becomes SELECT *", async () => {
-    await roundTrips("FROM t", `SELECT * FROM "t"`);
+    await roundTrips("FROM t", `SELECT * FROM t`);
   });
 
   test("FROM with WHERE", async () => {
@@ -201,7 +201,7 @@ describe("DuckDB preprocessor: named arguments", () => {
 // ===========================================================================
 describe("DuckDB preprocessor: == operator", () => {
   test("== normalises to =", async () => {
-    await roundTrips("SELECT a FROM t WHERE i == 0", `SELECT "a" FROM "t" WHERE "i" = 0`);
+    await roundTrips("SELECT a FROM t WHERE i == 0", `SELECT a FROM t WHERE i = 0`);
   });
 
   test("!= is not touched", async () => {
@@ -220,7 +220,7 @@ describe("DuckDB preprocessor: VALUES derived tables", () => {
   test("VALUES with a column alias list", async () => {
     await roundTrips(
       "SELECT * FROM (VALUES (1,2)) t(a,b)",
-      `SELECT * FROM (VALUES (1, 2)) AS "t"("a", "b")`
+      `SELECT * FROM (VALUES (1, 2)) AS t(a, b)`
     );
   });
 

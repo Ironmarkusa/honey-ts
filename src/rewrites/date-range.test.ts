@@ -84,8 +84,8 @@ describe("rewriteDateRange", () => {
       to: "2025-02-01",
     });
     const sql = renderSql(result);
-    assert.match(sql, /"d" >= '2025-01-01'/);
-    assert.match(sql, /"d" < '2025-02-01'/);
+    assert.match(sql, /d >= '2025-01-01'/);
+    assert.match(sql, /d < '2025-02-01'/);
     assert.doesNotMatch(sql, /2024/);
   });
 
@@ -125,7 +125,7 @@ describe("rewriteDateRange", () => {
       strategy: "inclusive",
     });
     const sql = renderSql(result);
-    assert.match(sql, /"d" <= '2025-12-31'/);
+    assert.match(sql, /d <= '2025-12-31'/);
   });
 
   it("preserves non-date predicates", () => {
@@ -138,8 +138,8 @@ describe("rewriteDateRange", () => {
       to: "2025-02-01",
     });
     const sql = renderSql(result);
-    assert.match(sql, /"status" = 'active'/);
-    assert.match(sql, /"region" = 'us'/);
+    assert.match(sql, /status = 'active'/);
+    assert.match(sql, /region = 'us'/);
   });
 
   it("rewrites in subqueries and CTEs", () => {

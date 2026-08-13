@@ -81,13 +81,13 @@ describe("fromSql", () => {
 
 describe("round-trip", () => {
   const testCases = [
-    'SELECT "id", "name" FROM "users"',
-    'SELECT * FROM "users" WHERE "id" = 1',
-    'SELECT * FROM "users" WHERE "status" = \'active\'',
-    'SELECT * FROM "users" ORDER BY "created_at" DESC',
-    'SELECT * FROM "users" LIMIT 10',
-    'SELECT "status", count(*) FROM "users" GROUP BY "status"',
-    'DELETE FROM "users" WHERE "id" = 1',
+    'SELECT id, name FROM users',
+    'SELECT * FROM users WHERE id = 1',
+    'SELECT * FROM users WHERE status = \'active\'',
+    'SELECT * FROM users ORDER BY created_at DESC',
+    'SELECT * FROM users LIMIT 10',
+    'SELECT status, count(*) FROM users GROUP BY status',
+    'DELETE FROM users WHERE id = 1',
   ];
 
   for (const sql of testCases) {
@@ -289,7 +289,7 @@ describe("complex real-world round-trip", () => {
           '10_pack', s."10 Pack Sold #"::integer,
           '20_pack', s."20 Pack Sold #"::integer
       ) AS txn_breakdown
-    FROM staging."import_21ab49f41ac2462e931dedfd3ceb3768" s`;
+    FROM staging.import_21ab49f41ac2462e931dedfd3ceb3768 s`;
 
     const clause = fromSql(sql);
 

@@ -45,9 +45,9 @@ describe("scenario: ROI report cell", () => {
       to: "2025-04-01",
     });
     const s = render(out);
-    assert.match(s, /"brand_id" = 'acme'/);
-    assert.match(s, /"date_day" >= '2025-03-01'/);
-    assert.match(s, /"date_day" < '2025-04-01'/);
+    assert.match(s, /brand_id = 'acme'/);
+    assert.match(s, /date_day >= '2025-03-01'/);
+    assert.match(s, /date_day < '2025-04-01'/);
     assert.doesNotMatch(s, /2024/);
   });
 
@@ -63,7 +63,7 @@ describe("scenario: ROI report cell", () => {
         })
     );
     const s = render(out);
-    assert.match(s, /"tenant_id" = 'tenant_abc'/);
+    assert.match(s, /tenant_id = 'tenant_abc'/);
     assert.match(s, /2025-03-01/);
   });
 });
@@ -83,8 +83,8 @@ describe("scenario: joined table with aliased date column", () => {
       to: "2025-07-01",
     });
     const s = render(out);
-    assert.match(s, /"o"\."created_at" >= '2025-06-01'/);
-    assert.match(s, /"o"\."created_at" < '2025-07-01'/);
+    assert.match(s, /o\.created_at >= '2025-06-01'/);
+    assert.match(s, /o\.created_at < '2025-07-01'/);
   });
 });
 
@@ -113,8 +113,8 @@ describe("scenario: CTE date predicate + column healing", () => {
       to: "2025-02-01",
     });
     const s = render(out);
-    assert.match(s, /"date_day" >= '2025-01-01'/);
-    assert.match(s, /"date_day" < '2025-02-01'/);
+    assert.match(s, /date_day >= '2025-01-01'/);
+    assert.match(s, /date_day < '2025-02-01'/);
   });
 
   it("replaceColumn heals through CTE and aggregate functions", () => {
@@ -123,10 +123,10 @@ describe("scenario: CTE date predicate + column healing", () => {
       to: "spend_amount",
     });
     const s = render(out);
-    assert.match(s, /SUM\("spend_amount"\)/i);
+    assert.match(s, /SUM\(spend_amount\)/i);
     assert.doesNotMatch(s, /spend_usd/);
     // The output alias "spend" must be preserved (it matches end of the col name)
-    assert.match(s, /AS "spend"/);
+    assert.match(s, /AS spend/);
   });
 });
 
@@ -151,8 +151,8 @@ describe("scenario: BETWEEN DATE literal → half-open", () => {
     });
     const s = render(out);
     assert.doesNotMatch(s, /BETWEEN/i);
-    assert.match(s, /"date_day" >= '2025-01-01'/);
-    assert.match(s, /"date_day" < '2025-04-01'/);
+    assert.match(s, /date_day >= '2025-01-01'/);
+    assert.match(s, /date_day < '2025-04-01'/);
   });
 });
 
@@ -166,10 +166,10 @@ describe("scenario: table rename for healing", () => {
   it("preserves aliases + rewrites qualified refs", () => {
     const out = replaceTable(fromSql(sql), "users", "members");
     const s = render(out);
-    assert.match(s, /FROM "members" AS "u"/);
-    assert.match(s, /"u"\."id"/); // alias preserved
-    assert.match(s, /"u"\."status"/); // alias preserved
-    assert.doesNotMatch(s, /"users"/);
+    assert.match(s, /FROM members AS u/);
+    assert.match(s, /u\.id/); // alias preserved
+    assert.match(s, /u\.status/); // alias preserved
+    assert.doesNotMatch(s, /users/);
   });
 });
 

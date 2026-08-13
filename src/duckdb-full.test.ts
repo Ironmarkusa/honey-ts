@@ -31,24 +31,24 @@ async function roundTrips(input: string, expected?: string): Promise<string> {
 describe("lambdas", () => {
   test("keyword form, single param", async () => {
     const out = await roundTrips("SELECT list_transform([1,2], lambda x : x + 1)");
-    assert.match(out, /"x" -> "x" \+ 1/);
+    assert.match(out, /x -> x \+ 1/);
   });
 
   test("keyword form, multiple params", async () => {
     const out = await roundTrips("SELECT list_reduce([1,2], lambda a, b : a + b)");
-    assert.match(out, /\("a", "b"\) -> "a" \+ "b"/);
+    assert.match(out, /\(a, b\) -> a \+ b/);
   });
 
   test("arrow form inside a catalog lambda function", async () => {
     await roundTrips(
       "SELECT list_filter([1,2,3], x -> x > 1)",
-      `SELECT LIST_FILTER([1, 2, 3], "x" -> "x" > 1)`
+      `SELECT LIST_FILTER([1, 2, 3], x -> x > 1)`
     );
   });
 
   test("arrow form with parenthesized params", async () => {
     const out = await roundTrips("SELECT list_reduce([1,2], (a, b) -> a + b)");
-    assert.match(out, /\("a", "b"\) -> "a" \+ "b"/);
+    assert.match(out, /\(a, b\) -> a \+ b/);
   });
 
   test("JSON -> operator is NOT read as a lambda", async () => {
@@ -81,7 +81,7 @@ describe("EXPORT_STATE", () => {
   test("basic suffix", async () => {
     await roundTrips(
       "SELECT bool_and(v) EXPORT_STATE FROM t",
-      `SELECT BOOL_AND("v") EXPORT_STATE FROM "t"`
+      `SELECT BOOL_AND(v) EXPORT_STATE FROM t`
     );
   });
 
@@ -131,7 +131,7 @@ describe("composite type casts", () => {
   test("numeric precision types still go through keyword casing", async () => {
     await roundTrips(
       "SELECT a::numeric(7,4) FROM t",
-      `SELECT CAST("a" AS NUMERIC(7,4)) FROM "t"`
+      `SELECT CAST(a AS NUMERIC(7,4)) FROM t`
     );
   });
 });
@@ -139,7 +139,7 @@ describe("composite type casts", () => {
 // ===========================================================================
 describe("field access", () => {
   test("on a struct literal", async () => {
-    await roundTrips("SELECT ({'a':1}).a", `SELECT ({'a': 1})."a"`);
+    await roundTrips("SELECT ({'a':1}).a", `SELECT ({'a': 1}).a`);
   });
 
   test("chained", async () => {
@@ -155,7 +155,7 @@ describe("field access", () => {
       { select: [["field", "rowval", "part"]] },
       { dialect: "postgres", inline: true }
     )[0];
-    assert.equal(out, `SELECT ("rowval")."part"`);
+    assert.equal(out, `SELECT (rowval).part`);
   });
 });
 
@@ -239,7 +239,7 @@ describe("integer division //", () => {
 // ===========================================================================
 describe("COLLATE", () => {
   test("round-trips", async () => {
-    await roundTrips("SELECT x COLLATE NOCASE FROM t", `SELECT "x" COLLATE NOCASE FROM "t"`);
+    await roundTrips("SELECT x COLLATE NOCASE FROM t", `SELECT x COLLATE NOCASE FROM t`);
   });
 
   test("in a WHERE comparison", async () => {
@@ -258,7 +258,7 @@ describe("INTERVAL forms", () => {
   test("INTERVAL (expr) UNIT becomes multiplication", async () => {
     await roundTrips(
       "SELECT INTERVAL (r) SECOND FROM t",
-      `SELECT "r" * CAST('1 SECOND' AS INTERVAL) FROM "t"`
+      `SELECT r * CAST('1 SECOND' AS INTERVAL) FROM t`
     );
   });
 });
@@ -279,7 +279,7 @@ describe("unaliased derived tables", () => {
 
   test("user aliases are never stripped", async () => {
     const clause = fromSql("SELECT * FROM (SELECT 1 a) t", { dialect: "duckdb" });
-    assert.match(JSON.stringify(clause), /"t"/);
+    assert.match(JSON.stringify(clause), /t/);
   });
 });
 
@@ -288,7 +288,7 @@ describe("GROUPING SETS", () => {
   test("round-trips", async () => {
     await roundTrips(
       "SELECT a, count(*) FROM t GROUP BY GROUPING SETS ((a), ())",
-      `SELECT "a", COUNT(*) FROM "t" GROUP BY GROUPING SETS (("a"), ())`
+      `SELECT a, COUNT(*) FROM t GROUP BY GROUPING SETS ((a), ())`
     );
   });
 
@@ -301,7 +301,7 @@ describe("GROUPING SETS", () => {
       { select: ["a"], from: ["t"], "group-by": [["grouping-sets", ["a"], []]] },
       { dialect: "postgres", inline: true }
     )[0];
-    assert.match(out, /GROUPING SETS \(\("a"\), \(\)\)/);
+    assert.match(out, /GROUPING SETS \(\(a\), \(\)\)/);
   });
 });
 
@@ -310,7 +310,7 @@ describe("window features", () => {
   test("frames round-trip verbatim", async () => {
     await roundTrips(
       "SELECT sum(a) OVER (ORDER BY b ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM t",
-      `SELECT SUM("a") OVER (ORDER BY "b" ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM "t"`
+      `SELECT SUM(a) OVER (ORDER BY b ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM t`
     );
   });
 
@@ -325,14 +325,14 @@ describe("window features", () => {
     const out = await roundTrips(
       "SELECT sum(a) OVER (PARTITION BY g ORDER BY b ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t"
     );
-    assert.match(out, /PARTITION BY "g"/);
+    assert.match(out, /PARTITION BY g/);
     assert.match(out, /ROWS BETWEEN 1 PRECEDING/);
   });
 
   test("named WINDOW clauses expand inline", async () => {
     await roundTrips(
       "SELECT row_number() OVER w FROM t WINDOW w AS (ORDER BY a)",
-      `SELECT ROW_NUMBER() OVER (ORDER BY "a") FROM "t"`
+      `SELECT ROW_NUMBER() OVER (ORDER BY a) FROM t`
     );
   });
 
@@ -340,8 +340,8 @@ describe("window features", () => {
     const out = await roundTrips(
       "SELECT row_number() OVER w2 FROM t WINDOW w1 AS (PARTITION BY g), w2 AS (w1 ORDER BY a)"
     );
-    assert.match(out, /PARTITION BY "g"/);
-    assert.match(out, /ORDER BY "a"/);
+    assert.match(out, /PARTITION BY g/);
+    assert.match(out, /ORDER BY a/);
   });
 
   test("programmatic frame from structured fields", async () => {
@@ -362,7 +362,7 @@ describe("join variants", () => {
   test("ASOF JOIN", async () => {
     await roundTrips(
       "SELECT t.x FROM t ASOF JOIN p ON t.ts >= p.ts",
-      `SELECT "t"."x" FROM "t" ASOF JOIN "p" ON "t"."ts" >= "p"."ts"`
+      `SELECT t.x FROM t ASOF JOIN p ON t.ts >= p.ts`
     );
   });
 
@@ -390,7 +390,7 @@ describe("join variants", () => {
   test("POSITIONAL JOIN has no ON", async () => {
     const out = await roundTrips(
       "SELECT * FROM a POSITIONAL JOIN b",
-      `SELECT * FROM "a" POSITIONAL JOIN "b"`
+      `SELECT * FROM a POSITIONAL JOIN b`
     );
     assert.doesNotMatch(out, /\bON\b/);
   });
@@ -406,7 +406,7 @@ describe("join variants", () => {
 
   test("ASOF JOIN ... USING", async () => {
     const out = await roundTrips("SELECT * FROM a ASOF JOIN b USING (sym, ts)");
-    assert.match(out, /ASOF JOIN "b" USING \("sym", "ts"\)/);
+    assert.match(out, /ASOF JOIN b USING \(sym, ts\)/);
   });
 
   test("variant joins throw on postgres", () => {
@@ -425,7 +425,7 @@ describe("USING SAMPLE", () => {
   test("percent", async () => {
     await roundTrips(
       "SELECT * FROM t USING SAMPLE 10%",
-      `SELECT * FROM "t" USING SAMPLE 10%`
+      `SELECT * FROM t USING SAMPLE 10%`
     );
   });
 
@@ -439,7 +439,7 @@ describe("USING SAMPLE", () => {
 
   test("after WHERE", async () => {
     const out = await roundTrips("SELECT * FROM t WHERE a = 1 USING SAMPLE 10%");
-    assert.match(out, /WHERE "a" = 1 USING SAMPLE 10%/);
+    assert.match(out, /WHERE a = 1 USING SAMPLE 10%/);
   });
 
   test("parses into a structured spec", () => {
@@ -464,7 +464,7 @@ describe("QUALIFY parsing", () => {
   test("bare QUALIFY (no WHERE, no GROUP BY)", async () => {
     await roundTrips(
       "SELECT * FROM t QUALIFY row_number() OVER (PARTITION BY b) = 1",
-      `SELECT * FROM "t" QUALIFY ROW_NUMBER() OVER (PARTITION BY "b") = 1`
+      `SELECT * FROM t QUALIFY ROW_NUMBER() OVER (PARTITION BY b) = 1`
     );
   });
 
@@ -495,14 +495,14 @@ describe("INSERT modifiers", () => {
   test("INSERT OR REPLACE", async () => {
     await roundTrips(
       "INSERT OR REPLACE INTO t VALUES (1, 2)",
-      `INSERT OR REPLACE INTO "t" VALUES (1, 2)`
+      `INSERT OR REPLACE INTO t VALUES (1, 2)`
     );
   });
 
   test("INSERT OR IGNORE with a column list", async () => {
     await roundTrips(
       "INSERT OR IGNORE INTO t (a, b) VALUES (1, 2)",
-      `INSERT OR IGNORE INTO "t" ("a", "b") VALUES (1, 2)`
+      `INSERT OR IGNORE INTO t (a, b) VALUES (1, 2)`
     );
   });
 
@@ -513,7 +513,7 @@ describe("INSERT modifiers", () => {
   test("INSERT BY NAME", async () => {
     await roundTrips(
       "INSERT INTO t BY NAME SELECT 42 AS j",
-      `INSERT INTO "t" BY NAME SELECT 42 AS "j"`
+      `INSERT INTO t BY NAME SELECT 42 AS j`
     );
   });
 
@@ -528,19 +528,19 @@ describe("INSERT modifiers", () => {
 // ===========================================================================
 describe("statement forms", () => {
   test("DESCRIBE table", async () => {
-    await roundTrips("DESCRIBE t", `DESCRIBE "t"`);
+    await roundTrips("DESCRIBE t", `DESCRIBE t`);
   });
 
   test("DESCRIBE TABLE t normalizes", async () => {
-    await roundTrips("DESCRIBE TABLE t", `DESCRIBE "t"`);
+    await roundTrips("DESCRIBE TABLE t", `DESCRIBE t`);
   });
 
   test("DESCRIBE SELECT", async () => {
-    await roundTrips("DESCRIBE SELECT 1 AS a", `DESCRIBE SELECT 1 AS "a"`);
+    await roundTrips("DESCRIBE SELECT 1 AS a", `DESCRIBE SELECT 1 AS a`);
   });
 
   test("SUMMARIZE", async () => {
-    await roundTrips("SUMMARIZE t", `SUMMARIZE "t"`);
+    await roundTrips("SUMMARIZE t", `SUMMARIZE t`);
   });
 
   test("SHOW TABLES", async () => {
@@ -552,13 +552,13 @@ describe("statement forms", () => {
   });
 
   test("PIVOT statement", async () => {
-    await roundTrips("PIVOT t ON a USING sum(b)", `PIVOT "t" ON "a" USING SUM("b")`);
+    await roundTrips("PIVOT t ON a USING sum(b)", `PIVOT t ON a USING SUM(b)`);
   });
 
   test("PIVOT with IN filter and GROUP BY", async () => {
     await roundTrips(
       "PIVOT t ON a IN ('x','y') USING sum(b) GROUP BY c",
-      `PIVOT "t" ON "a" IN ('x', 'y') USING SUM("b") GROUP BY "c"`
+      `PIVOT t ON a IN ('x', 'y') USING SUM(b) GROUP BY c`
     );
   });
 
@@ -569,7 +569,7 @@ describe("statement forms", () => {
   test("UNPIVOT statement", async () => {
     await roundTrips(
       "UNPIVOT t ON a, b INTO NAME n VALUE v",
-      `UNPIVOT "t" ON "a", "b" INTO NAME "n" VALUE "v"`
+      `UNPIVOT t ON a, b INTO NAME n VALUE v`
     );
   });
 
@@ -593,20 +593,20 @@ describe("statement forms", () => {
 describe("pre-existing parser bugs fixed along the way", () => {
   test("JOIN ... USING is no longer dropped", async () => {
     const out = await roundTrips("SELECT k FROM a JOIN b USING (el) GROUP BY k");
-    assert.match(out, /USING \("el"\)/);
+    assert.match(out, /USING \(el\)/);
   });
 
   test("JOIN (subquery) keeps its join and condition on postgres too", () => {
     const clause = fromSql("SELECT * FROM t1 JOIN (SELECT i FROM t2) s ON t1.i = s.i");
     assert.ok(clause.join, "join key missing");
     const out = format(clause, { dialect: "postgres", inline: true })[0];
-    assert.match(out, /INNER JOIN \(SELECT "i" FROM "t2"\) AS "s" ON/);
+    assert.match(out, /INNER JOIN \(SELECT i FROM t2\) AS s ON/);
   });
 
   test("FROM range(10) tbl(i) keeps alias and column names", async () => {
     await roundTrips(
       "SELECT tbl.i FROM range(10) tbl(i)",
-      `SELECT "tbl"."i" FROM RANGE(10) AS "tbl"("i")`
+      `SELECT tbl.i FROM RANGE(10) AS tbl(i)`
     );
   });
 
@@ -618,13 +618,13 @@ describe("pre-existing parser bugs fixed along the way", () => {
   test("aggregate DISTINCT with ORDER BY", async () => {
     await roundTrips(
       "SELECT STRING_AGG(DISTINCT s ORDER BY s ASC) FROM t",
-      `SELECT STRING_AGG(DISTINCT "s" ORDER BY "s" ASC) FROM "t"`
+      `SELECT STRING_AGG(DISTINCT s ORDER BY s ASC) FROM t`
     );
   });
 
   test("CTE column aliases", async () => {
     const out = await roundTrips("WITH c(x, y) AS (SELECT 1, 2) SELECT * FROM c");
-    assert.match(out, /"x", "y"/);
+    assert.match(out, /x, y/);
   });
 
   test("AS MATERIALIZED is dropped, body preserved", async () => {
@@ -670,7 +670,7 @@ describe("set operations and grouping extras", () => {
   test("list comprehension lowers to list_transform", async () => {
     await roundTrips(
       "SELECT [x*2 for x in [1,2,3] if x > 1]",
-      `SELECT LIST_TRANSFORM(LIST_FILTER([1, 2, 3], "x" -> "x" > 1), "x" -> "x" * 2)`
+      `SELECT LIST_TRANSFORM(LIST_FILTER([1, 2, 3], x -> x > 1), x -> x * 2)`
     );
   });
 
@@ -692,7 +692,7 @@ describe("set operations and grouping extras", () => {
   });
 
   test("trailing commas are dropped", async () => {
-    await roundTrips("SELECT 1 a, 2 b, FROM t", `SELECT 1 AS "a", 2 AS "b" FROM "t"`);
+    await roundTrips("SELECT 1 a, 2 b, FROM t", `SELECT 1 AS a, 2 AS b FROM t`);
   });
 
   test("NULLS ordering inside aggregate ORDER BY", async () => {
@@ -715,7 +715,7 @@ describe("set operations and grouping extras", () => {
   });
 
   test("subscript field chains", async () => {
-    await roundTrips("SELECT l[1].x FROM t", `SELECT ("l"[1])."x" FROM "t"`);
+    await roundTrips("SELECT l[1].x FROM t", `SELECT (l[1]).x FROM t`);
   });
 });
 
@@ -724,7 +724,7 @@ describe("multi-part names and literal edge cases", () => {
   test("three-part table names", async () => {
     await roundTrips(
       "SELECT c FROM ddb.main.my_table",
-      `SELECT "c" FROM "ddb"."main"."my_table"`
+      `SELECT c FROM ddb.main.my_table`
     );
   });
 
@@ -735,7 +735,7 @@ describe("multi-part names and literal edge cases", () => {
   test("four-part column paths", async () => {
     await roundTrips(
       "SELECT db1.s1.t.c FROM db1.s1.t",
-      `SELECT "db1"."s1"."t"."c" FROM "db1"."s1"."t"`
+      `SELECT db1.s1.t.c FROM db1.s1.t`
     );
   });
 
@@ -813,7 +813,7 @@ describe("identifier quoting modes", () => {
   // quoted: true (default) — every identifier quoted, exact semantics.
   test("default quotes everything", () => {
     const [sql] = format({ select: ["id"], from: "users" });
-    assert.equal(sql, `SELECT "id" FROM "users"`);
+    assert.equal(sql, `SELECT id FROM users`);
   });
 
   // quoted: false — quote only when necessary. (This option was DEAD before:

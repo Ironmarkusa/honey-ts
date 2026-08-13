@@ -27,15 +27,15 @@ describe("addWhere", () => {
   it("sets WHERE when absent", () => {
     const clause = fromSql("SELECT * FROM t");
     const result = addWhere(clause, ["=", "tenant_id", { $: "acme" }]);
-    assert.match(renderSql(result), /WHERE "tenant_id" = 'acme'/);
+    assert.match(renderSql(result), /WHERE tenant_id = 'acme'/);
   });
 
   it("ANDs with existing WHERE", () => {
     const clause = fromSql("SELECT * FROM t WHERE x = 1");
     const result = addWhere(clause, ["=", "tenant_id", { $: "acme" }]);
     const sql = renderSql(result);
-    assert.match(sql, /"x" = 1/);
-    assert.match(sql, /"tenant_id" = 'acme'/);
+    assert.match(sql, /x = 1/);
+    assert.match(sql, /tenant_id = 'acme'/);
     assert.match(sql, /AND/);
   });
 
@@ -108,8 +108,8 @@ describe("removeWhere", () => {
     );
     const result = removeWhere(clause, dateRange("date"));
     const sql = renderSql(result);
-    assert.match(sql, /"a" = 1/);
-    assert.match(sql, /"b" = 2/);
+    assert.match(sql, /a = 1/);
+    assert.match(sql, /b = 2/);
     assert.doesNotMatch(sql, /2024-01-01/);
   });
 
@@ -138,21 +138,21 @@ describe("addSelect / removeSelect", () => {
   it("appends a select item", () => {
     const clause = fromSql("SELECT id FROM t");
     const result = addSelect(clause, "name");
-    assert.match(renderSql(result), /"id", "name"/);
+    assert.match(renderSql(result), /id, name/);
   });
 
   it("appends with alias", () => {
     const clause = fromSql("SELECT id FROM t");
     const result = addSelect(clause, ["%count", "*"], "total");
-    assert.match(renderSql(result), /COUNT\(\*\) AS "total"/i);
+    assert.match(renderSql(result), /COUNT\(\*\) AS total/i);
   });
 
   it("removes by matcher", () => {
     const clause = fromSql("SELECT id, email, name FROM t");
     const result = removeSelect(clause, col("email"));
     const sql = renderSql(result);
-    assert.match(sql, /"id", "name"/);
-    assert.doesNotMatch(sql, /"email"/);
+    assert.match(sql, /id, name/);
+    assert.doesNotMatch(sql, /email/);
   });
 });
 
@@ -160,14 +160,14 @@ describe("addGroupBy / removeGroupBy", () => {
   it("adds group-by column", () => {
     const clause = fromSql("SELECT status FROM t");
     const result = addGroupBy(clause, "status");
-    assert.match(renderSql(result), /GROUP BY "status"/);
+    assert.match(renderSql(result), /GROUP BY status/);
   });
 
   it("removes by matcher", () => {
     const clause = fromSql("SELECT * FROM t GROUP BY status, region");
     const result = removeGroupBy(clause, col("status"));
     const sql = renderSql(result);
-    assert.match(sql, /GROUP BY "region"/);
+    assert.match(sql, /GROUP BY region/);
   });
 });
 
@@ -176,7 +176,7 @@ describe("order-by / limit / offset", () => {
     const clause = fromSql("SELECT * FROM t ORDER BY id");
     const result = addOrderBy(clause, [["name", "desc"]] as never);
     const sql = renderSql(result);
-    assert.match(sql, /ORDER BY "id".*"name" DESC/);
+    assert.match(sql, /ORDER BY id.*name DESC/);
   });
 
   it("addOrderBy prepends", () => {
@@ -185,15 +185,15 @@ describe("order-by / limit / offset", () => {
       position: "prepend",
     });
     const sql = renderSql(result);
-    assert.match(sql, /ORDER BY "name" DESC.*"id"/);
+    assert.match(sql, /ORDER BY name DESC.*id/);
   });
 
   it("setOrderBy replaces", () => {
     const clause = fromSql("SELECT * FROM t ORDER BY id");
     const result = setOrderBy(clause, [["name", "desc"]] as never);
     const sql = renderSql(result);
-    assert.match(sql, /ORDER BY "name" DESC/);
-    assert.doesNotMatch(sql, /"id"/);
+    assert.match(sql, /ORDER BY name DESC/);
+    assert.doesNotMatch(sql, /id/);
   });
 
   it("clearOrderBy removes", () => {
