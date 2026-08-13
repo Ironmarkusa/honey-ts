@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>honey-ts query builder</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4/dist/index.global.js"></script>
+  <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0/bundles/datastar.js"></script>
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-200 antialiased"
+      data-signals="{sql: '', dialect: 'postgres', edit: '', newcol: '', docjson: ''}">
+
+  <div class="mx-auto max-w-5xl px-6 py-10 space-y-6">
+
+    <!-- header -->
+    <header class="flex items-end justify-between">
+      <div>
+        <h1 class="text-xl font-bold tracking-tight">
+          <span class="text-amber-400">honey-ts</span>
+          <span class="text-slate-500 font-normal">/</span> query builder
+        </h1>
+        <p class="mt-1 text-sm text-slate-500">
+          Paste SQL → it becomes a plain-data document → edit visually → SQL re-emits live.
+        </p>
+      </div>
+      <div class="flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-900 p-1 text-xs font-semibold">
+        <button data-on:click="$dialect = 'postgres'; @post('/render')"
+          data-class="{'bg-sky-500/20 text-sky-300': $dialect === 'postgres', 'text-slate-500': $dialect !== 'postgres'}"
+          class="rounded-lg px-3 py-1.5 transition-colors">postgres</button>
+        <button data-on:click="$dialect = 'duckdb'; @post('/render')"
+          data-class="{'bg-amber-500/20 text-amber-300': $dialect === 'duckdb', 'text-slate-500': $dialect !== 'duckdb'}"
+          class="rounded-lg px-3 py-1.5 transition-colors">duckdb</button>
+      </div>
+    </header>
+
+    <!-- input card -->
+    <div class="rounded-2xl border border-slate-700/70 bg-slate-800/30 p-5 space-y-3">
+      <textarea data-bind:sql rows="4" spellcheck="false"
+        placeholder="SELECT u.plan, sum(o.total) AS revenue&#10;FROM users u JOIN orders o ON u.id = o.user_id&#10;WHERE o.placed_at >= '2026-08-01' AND o.tenant_id = 't1'&#10;GROUP BY u.plan ORDER BY revenue DESC"
+        class="w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-200 outline-none placeholder:text-slate-600 focus:border-sky-500"></textarea>
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex flex-wrap items-center gap-1.5 text-[11px]">
+          <span class="text-slate-600">samples:</span>
+          <button class="rounded-lg border border-slate-700 px-2 py-1 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+            data-on:click="$sql = &quot;SELECT u.plan, sum(o.total) AS revenue, count(*) AS orders\nFROM users u JOIN orders o ON u.id = o.user_id\nWHERE o.placed_at >= '2026-08-01' AND o.tenant_id = 't1'\nGROUP BY u.plan\nORDER BY revenue DESC\nLIMIT 100&quot;; @post('/parse')">analytics join</button>
+          <button class="rounded-lg border border-slate-700 px-2 py-1 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+            data-on:click="$sql = &quot;SELECT status, [x * 2 for x in scores] AS doubled\nFROM orders\nWHERE total &gt; 100\nQUALIFY row_number() OVER (PARTITION BY status ORDER BY total DESC) &lt;= 3&quot;; $dialect = 'duckdb'; @post('/parse')">duckdb-only</button>
+          <button class="rounded-lg border border-slate-700 px-2 py-1 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+            data-on:click="$sql = &quot;SELECT id FROM orders WHERE status = 'a' OR (total &gt; 50 AND placed_at &gt;= '2026-01-01')&quot;; @post('/parse')">nested logic</button>
+        </div>
+        <button data-on:click="@post('/parse')"
+          class="rounded-xl bg-sky-500 px-5 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-sky-500/20 transition hover:bg-sky-400">
+          Parse →
+        </button>
+      </div>
+    </div>
+
+    <!-- status / errors -->
+    <div id="status"></div>
+
+    <!-- builder -->
+    <div id="builder" class="grid place-items-center rounded-2xl border border-dashed border-slate-700 p-10 text-sm text-slate-500">
+      Paste a query and hit <span class="mx-1 font-semibold text-slate-300">Parse</span> to build.
+    </div>
+
+    <!-- output -->
+    <div id="output" class="rounded-2xl border border-slate-700/70 bg-slate-800/30 p-5 text-sm text-slate-600">
+      SQL appears here.
+    </div>
+
+    <footer class="pt-2 text-center text-[11px] text-slate-700">
+      the document is a JSON signal — the server is stateless · honey-ts does the rest
+    </footer>
+  </div>
+</body>
+</html>

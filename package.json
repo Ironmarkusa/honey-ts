@@ -37,6 +37,7 @@
     "test": "node --test --import tsx src/*.test.ts src/rewrites/*.test.ts",
     "gen:duckdb-ops": "tsx scripts/gen-duckdb-ops.ts",
     "gen:duckdb-corpus": "tsx scripts/extract-duckdb-corpus.ts",
+    "demo": "tsx examples/query-builder/server.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
@@ -57,6 +58,7 @@
     "@duckdb/node-api": "^1.5.5-r.4",
     "@types/node": "^25.2.0",
     "fast-check": "^4.5.3",
+    "playwright": "^1.62.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
