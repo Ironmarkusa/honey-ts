@@ -11,7 +11,7 @@ import { fromSql } from "./parser.js";
 import { format } from "./sql.js";
 import { checkSyntax } from "./duckdb-oracle.js";
 import { LAMBDA_FUNCTIONS } from "./duckdb-preprocess.js";
-import { DUCKDB_FUNCTIONS } from "./duckdb-ops.generated.js";
+import { DUCKDB_FUNCTIONS, DUCKDB_RESERVED_KEYWORDS } from "./duckdb-ops.generated.js";
 import type { SqlClause } from "./types.js";
 
 const duck = (clause: SqlClause) =>
@@ -806,4 +806,70 @@ describe("tree walkers reach every nested clause", () => {
       assert.ok(filters >= 2, `expected filter in nested clause too:\n  ${out}`);
     });
   }
+});
+
+// ===========================================================================
+describe("identifier quoting modes", () => {
+  // quoted: true (default) — every identifier quoted, exact semantics.
+  test("default quotes everything", () => {
+    const [sql] = format({ select: ["id"], from: "users" });
+    assert.equal(sql, `SELECT "id" FROM "users"`);
+  });
+
+  // quoted: false — quote only when necessary. (This option was DEAD before:
+  // a port vestige unconditionally quoted every plain-string identifier.)
+  test("quoted:false leaves safe identifiers bare", () => {
+    const [sql] = format(
+      { select: ["id", "u.email"], from: [["users", "u"]], where: ["=", "status", { $: "x" }] },
+      { quoted: false, inline: true }
+    );
+    assert.equal(sql, "SELECT id, u.email FROM users AS u WHERE status = 'x'");
+  });
+
+  test("quoted:false still quotes reserved words", () => {
+    const [sql] = format({ select: ["select", "order", "user"], from: "t" }, { quoted: false });
+    assert.equal(sql, `SELECT "select", "order", "user" FROM t`);
+  });
+
+  test("quoted:false still quotes mixed case (PG folds unquoted)", () => {
+    const [sql] = format({ select: ["Id", "createdAt"], from: "t" }, { quoted: false });
+    assert.equal(sql, `SELECT "Id", "createdAt" FROM t`);
+  });
+
+  test("quotedAlways works with quoted:false", () => {
+    const [sql] = format({ select: ["id", "name"], from: "t" }, { quoted: false, quotedAlways: /^name$/ });
+    assert.equal(sql, `SELECT id, "name" FROM t`);
+  });
+
+  test("quoted:false output is valid DuckDB", async () => {
+    const [sql] = format(
+      { select: ["id", "select", "Weird"], from: [["users", "u"]], qualify: ["=", ["%row_number"], { v: 1 }] },
+      { quoted: false, dialect: "duckdb", inline: true }
+    );
+    assert.ok((await checkSyntax(sql)).valid, sql);
+  });
+
+  test("ident() always quotes exactly, in both modes", () => {
+    for (const quoted of [true, false]) {
+      const [sql] = format({ select: [{ ident: ["user name"] }], from: "t" }, { quoted });
+      assert.match(sql, /"user name"/);
+    }
+  });
+
+  test("embedded quotes are doubled, never breaking out", () => {
+    const [sql] = format({ select: [{ ident: ['x"; DROP TABLE t; --'] }], from: "t" });
+    assert.match(sql, /"x""; DROP TABLE t; --"/);
+  });
+
+  test("every DuckDB catalog reserved word is in RESERVED_WORDS", () => {
+    // Under-quoting a reserved word in quoted:false mode produces broken SQL;
+    // this pins the curated set against the engine's own list.
+    for (const word of DUCKDB_RESERVED_KEYWORDS) {
+      const [sql] = format({ select: [word], from: "t" }, { quoted: false });
+      assert.ok(
+        sql.includes(`"${word}"`),
+        `reserved word '${word}' was emitted unquoted`
+      );
+    }
+  });
 });

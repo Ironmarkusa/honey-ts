@@ -222,6 +222,33 @@ DUCKDB_FUNCTIONS_BY_NAME.get('date_trunc');
 null              // => NULL
 ```
 
+### Identifier Quoting
+
+By default every identifier is quoted — exact semantics, immune to reserved
+words, case folding, and injection through identifier position:
+
+```typescript
+format({ select: ["id"], from: "users" });
+// SELECT "id" FROM "users"
+```
+
+Pass `quoted: false` for quote-only-when-necessary output (reserved words,
+mixed case, and special characters stay quoted — bare lowercase names don't):
+
+```typescript
+format({ select: ["id", "select", "createdAt"], from: "users" }, { quoted: false });
+// SELECT id, "select", "createdAt" FROM users
+```
+
+Two rules worth knowing:
+
+- A plain string that doesn't *look* like an identifier (`"user name"`) is
+  treated as a **value**, not a column — use `ident("user name")` to reference
+  an exotic column name. `ident()` always quotes exactly and doubles any
+  embedded quotes.
+- Dots in plain strings split into qualified parts (`"u.id"` → `"u"."id"`);
+  `ident("weird.name")` keeps the dot inside one identifier.
+
 ### Expressions (Arrays)
 
 ```typescript

@@ -213,7 +213,9 @@ function createContext(opts: FormatOptions): FormatContext {
   return {
     dialect,
     options: {
-      quoted: opts.quoted ?? (opts.dialect !== undefined),
+      // Default: always quote. Exact identifier semantics, immune to reserved
+      // words and case folding. `quoted: false` = quote only when necessary.
+      quoted: opts.quoted ?? true,
       quotedSnake: opts.quotedSnake ?? false,
       quotedAlways: opts.quotedAlways,
       inline: opts.inline ?? false,
@@ -291,6 +293,40 @@ const opCanBeUnary = new Set<string>(["+", "-", "~"]);
 
 const alphanumeric = /^(?:[0-9_]+|[A-Za-z_][A-Za-z0-9_]*)$/;
 
+/** Identifiers safe to emit unquoted in quote-when-necessary mode: lowercase
+ * only, because PostgreSQL folds unquoted identifiers to lowercase — emitting
+ * `Users` unquoted would silently reference `users`. */
+const unquotedSafe = /^[a-z_][a-z0-9_]*$/;
+
+/**
+ * Reserved words that must stay quoted even in quote-when-necessary mode —
+ * the union of PostgreSQL's reserved keywords and DuckDB's (from
+ * duckdb_keywords(); duckdb.test.ts pins the DuckDB subset against the
+ * generated catalog so an engine upgrade cannot silently under-quote).
+ * Over-quoting is harmless; under-quoting a reserved word breaks the SQL.
+ */
+const RESERVED_WORDS = new Set([
+  // Shared / PostgreSQL reserved
+  "all", "analyse", "analyze", "and", "any", "array", "as", "asc",
+  "asymmetric", "authorization", "binary", "both", "case", "cast", "check",
+  "collate", "collation", "column", "concurrently", "constraint", "create",
+  "cross", "current_catalog", "current_date", "current_role",
+  "current_schema", "current_time", "current_timestamp", "current_user",
+  "default", "deferrable", "desc", "distinct", "do", "else", "end", "except",
+  "false", "fetch", "for", "foreign", "freeze", "from", "full", "grant",
+  "group", "having", "ilike", "in", "initially", "inner", "intersect", "into",
+  "is", "isnull", "join", "lateral", "leading", "left", "like", "limit",
+  "localtime", "localtimestamp", "natural", "not", "notnull", "null",
+  "offset", "on", "only", "or", "order", "outer", "overlaps", "placing",
+  "primary", "references", "returning", "right", "select", "session_user",
+  "similar", "some", "symmetric", "system_user", "table", "tablesample",
+  "then", "to", "trailing", "true", "union", "unique", "user", "using",
+  "variadic", "verbose", "when", "where", "window", "with",
+  // DuckDB additions
+  "describe", "lambda", "pivot", "pivot_longer", "pivot_wider", "qualify",
+  "show", "summarize", "unpivot",
+]);
+
 export function formatEntity(
   e: SqlIdent | string,
   ctx: FormatContext,
@@ -318,15 +354,25 @@ export function formatEntity(
   // Column name transformation
   const colName = quoted || typeof e === "string" ? (quotedSnake ? nameUnderscore(name) : name) : nameUnderscore(name);
 
-  // Quote function
+  // Quote function. `quoted: true` (the default) quotes every part — exact
+  // identifier semantics, robust against reserved words and case folding.
+  // `quoted: false` quotes only when necessary: reserved words, anything not
+  // lowercase-alphanumeric (PostgreSQL folds unquoted identifiers to
+  // lowercase, so unquoted mixed case would change meaning), and
+  // quotedAlways matches.
+  //
+  // (Historical note: this used to short-circuit on `typeof e === "string"`,
+  // which made the quoted/quotedAlways options dead for every plain-string
+  // identifier — i.e. all of them.)
   const quoteFn = (part: string): string => {
-    if (quoted || typeof e === "string") {
+    if (part === "*") return part;
+    if (quoted) {
       return dialect.quote(part);
     }
     if (quotedAlways?.test(part)) {
       return dialect.quote(part);
     }
-    if (alphanumeric.test(part)) {
+    if (unquotedSafe.test(part) && !RESERVED_WORDS.has(part)) {
       return part;
     }
     return dialect.quote(part);

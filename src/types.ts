@@ -196,7 +196,12 @@ export interface SqlClause {
 export interface FormatOptions {
   /** SQL dialect */
   dialect?: "ansi" | "postgres" | "mysql" | "sqlite" | "sqlserver" | "oracle" | "duckdb";
-  /** Quote all identifiers */
+  /**
+   * Identifier quoting. `true` (default) quotes every identifier — exact
+   * semantics, immune to reserved words and PostgreSQL case folding.
+   * `false` quotes only when necessary (reserved words, non-lowercase names,
+   * special characters, `quotedAlways` matches) for more readable SQL.
+   */
   quoted?: boolean;
   /** Convert dashes to underscores even when quoted */
   quotedSnake?: boolean;
