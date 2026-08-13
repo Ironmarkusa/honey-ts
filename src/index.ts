@@ -148,6 +148,35 @@ export {
 // available via format(clause, {dialect}); registerDialect adds custom ones.
 export { registerDialect, getDialect } from "./sql.js";
 
+// DuckDB construct types, guards and typed constructors. Namespaced because
+// the constructor names (list, struct, star, ...) are too generic to export
+// bare: `duckdb.list(1, 2)` reads better than a colliding top-level `list`.
+export * as duckdb from "./duckdb-types.js";
+export type {
+  DuckDBClause,
+  DuckDBExpr,
+  DuckDBStarSpec,
+  DuckDBListExpr,
+  DuckDBStructExpr,
+  DuckDBLambdaExpr,
+  DuckDBStarExpr,
+  DuckDBSliceExpr,
+  DuckDBNamedArgExpr,
+  DuckDBTryCastExpr,
+  DuckDBAggOrderByExpr,
+  DuckDBMapExpr,
+  DuckDBFieldExpr,
+  DuckDBExportStateExpr,
+  DuckDBIntDivExpr,
+  DuckDBCollateExpr,
+  DuckDBNullsModifierExpr,
+  DuckDBGroupingSetsExpr,
+  DuckDBWindowFrame,
+  DuckDBSampleSpec,
+  DuckDBPivotSpec,
+} from "./duckdb-types.js";
+export type { FromSqlOptions } from "./parser.js";
+
 // ============================================================================
 // Rewrites layer — find/rewrite/modify/apply helpers for clause trees.
 // Power the "parse → a couple of helpers → unparse" philosophy for dynamic SQL.

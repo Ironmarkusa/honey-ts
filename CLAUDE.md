@@ -369,41 +369,62 @@ fromSql("SELECT [1, 2], {'a': 1} FROM t GROUP BY ALL", { dialect: 'duckdb' });
 ```
 
 It rewrites DuckDB constructs into PostgreSQL-parseable text using reserved
-sentinel calls, then converts them back to native honey constructs after
-parsing, so the clause map round-trips to real DuckDB syntax. Handled:
+sentinel calls (or dispatches whole statements to dedicated mini-parsers),
+then converts them back to native honey constructs after parsing, so the
+clause map round-trips to real DuckDB syntax. Handled:
 
 | construct | example |
 |---|---|
-| list literals | `[1, 2, 3]`, nested |
-| struct literals | `{'a': 1, 'b': 'x'}` |
-| list slicing | `a[1:2]`, `a[2:]`, `a[:3]` |
-| `TRY_CAST` | `TRY_CAST(a AS INT)` |
-| aggregate `ORDER BY` | `list(v ORDER BY v DESC)` |
-| `GROUP BY` / `ORDER BY ALL` | `GROUP BY ALL` |
-| FROM-first | `FROM t SELECT a` |
-| named arguments | `f(bin_count => 10)`, `f(x := 1)` |
-| `==` | normalised to `=` |
+| list / struct / map literals | `[1, 2]`, `{'a': 1}`, `MAP {'k': v}` |
+| list slicing / subscripts | `a[1:2]`, `a[2:]`, `col['key']` |
+| lambdas (both syntaxes) | `x -> x + 1`, `lambda x : x + 1` |
+| `TRY_CAST`, composite type casts | `x::STRUCT(a INT)`, `::MAP(K,V)`, `::INT[3]` |
+| field access | `({'a':1}).a`, chained |
+| aggregate `ORDER BY` / `DISTINCT` | `list(v ORDER BY v DESC)` |
+| `EXPORT_STATE` | `sum(x) EXPORT_STATE` |
+| star modifiers | `* EXCLUDE (a) REPLACE (e AS n)`, `t.*` |
+| `GROUP BY ALL`, `GROUPING SETS` | `GROUP BY ALL` |
+| window frames + `EXCLUDE`, named `WINDOW` | `ROWS BETWEEN ... EXCLUDE TIES`, `OVER w` |
+| `QUALIFY` | after WHERE/GROUP BY/HAVING |
+| join variants | `ASOF [LEFT] JOIN`, `SEMI`, `ANTI`, `POSITIONAL` |
+| `USING SAMPLE` | `10%`, `5 ROWS`, `reservoir(10) REPEATABLE (42)` |
+| statements | `PIVOT`/`UNPIVOT` (both syntaxes), `DESCRIBE`, `SUMMARIZE`, `SHOW` |
+| INSERT modifiers | `INSERT OR REPLACE/IGNORE`, `BY NAME` |
+| misc | `//` division, `COLLATE`, `IGNORE NULLS`, `INTERVAL 5 SECOND`, `1.5e-3`, `$$strings$$`, `==`, FROM-first, unaliased subqueries, CTE column aliases |
 
-Rewrites are string-, identifier- and comment-aware, so brackets inside
-`'literals'`, `"identifiers"`, `$$blocks$$` and comments are never touched.
-Without `{dialect: 'duckdb'}` parsing is byte-for-byte unchanged.
+Rewrites are string-, identifier- and comment-aware, so construct-like text
+inside `'literals'`, `"identifiers"` and comments is never touched. Without
+`{dialect: 'duckdb'}` parsing is byte-for-byte unchanged.
+
+**The `->` ambiguity** is resolved by DuckDB's own catalog: an arrow is read
+as a lambda only in argument position of a function whose signature has a
+`LAMBDA`-typed parameter (`list_transform`, `list_filter`, ..., plus
+`COLUMNS`); everywhere else it stays the JSON operator. A test pins the
+lambda-function list against the generated catalog.
+
+Strong types for every construct live in `honey-ts` as `duckdb.*`:
+constructors (`duckdb.list(...)`, `duckdb.struct({...})`, `duckdb.lambda`,
+`duckdb.star`, `duckdb.map`, `duckdb.collate`, ...), guards
+(`duckdb.isDuckDBLambda(x)`, ...), and clause typing —
+`fromSql(sql, {dialect: 'duckdb'})` returns `DuckDBClause` with typed
+`qualify`/`sample`/`pivot`/join-variant keys.
 
 On DuckDB's own 23,670-statement test corpus: the PostgreSQL front end parses
-68.9%, the DuckDB front end **80.8%**, and **98.4%** of what parses round-trips
-back to SQL DuckDB accepts.
+68.9%, the DuckDB front end **90.7%**, and **99.0%** of what parses round-trips
+back to SQL DuckDB accepts (verified against a live DuckDB parser in CI).
 
 ### Known limitations
 
-- Not yet parsed: `EXCLUDE`/`REPLACE` star modifiers, `QUALIFY`, lambdas,
-  `PIVOT`, `ASOF`/`POSITIONAL` joins, `COLUMNS()`, `USING SAMPLE`. These can all
-  still be *built* as clause maps and emitted — only reading them back from SQL
-  is unsupported.
 - Data-modifying CTEs (`WITH d AS (DELETE ... RETURNING ...) SELECT`) parse and
   emit, but DuckDB rejects them — they are PostgreSQL-only.
 - `E'...'` escape-string literals fail upstream in `pgsql-ast-parser`.
+- `AS MATERIALIZED` CTE hints are dropped on parse (results unchanged).
+- Named `WINDOW` clauses are expanded inline; `FROM`-first and `INTERVAL n
+  UNIT` normalise to equivalent forms rather than round-tripping verbatim.
 - Integer division differs semantically: `5/2` is `2` on PostgreSQL and `2.5` on
   DuckDB. The dialect layer does not rewrite this, because doing so correctly
-  needs operand types.
+  needs operand types. (`5 // 2` is the DuckDB-only integer form and throws on
+  postgres.)
 
 ## SQL Guard (LLM Validation)
 

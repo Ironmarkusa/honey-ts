@@ -251,9 +251,12 @@ describe("DuckDB preprocessor: scanner", () => {
     assert.match(out, /__honey_list\(1\)/);
   });
 
-  test("finds dollar-quoted blocks", () => {
-    const sql = "SELECT $$ [1,2] $$";
-    assert.equal(preprocessDuckDb(sql), sql);
+  test("dollar-quoted blocks become single-quoted strings, contents untouched", () => {
+    // The content must survive verbatim — in particular the brackets must NOT
+    // be rewritten as a list literal.
+    assert.equal(preprocessDuckDb("SELECT $$ [1,2] $$"), "SELECT ' [1,2] '");
+    assert.equal(preprocessDuckDb("SELECT $tag$it's$tag$"), "SELECT 'it''s'");
+    assert.equal(preprocessDuckDb("SELECT $$a$b$$"), "SELECT 'a$b'");
   });
 
   test("finds block comments", () => {

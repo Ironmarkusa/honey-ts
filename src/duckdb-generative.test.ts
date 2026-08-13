@@ -12,7 +12,9 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import fc from "fast-check";
 import { format } from "./sql.js";
+import { fromSql } from "./parser.js";
 import { checkSyntax } from "./duckdb-oracle.js";
+import { DUCKDB_KEYWORDS } from "./duckdb-ops.generated.js";
 import type { SqlClause, SqlExpr } from "./types.js";
 import "./pg-ops.js";
 
@@ -38,7 +40,11 @@ async function accepts(clause: SqlClause): Promise<void> {
 
 // --- generators -------------------------------------------------------------
 
-const ident = fc.stringMatching(/^[a-z][a-z0-9_]{0,8}$/);
+// Bare identifiers must not collide with SQL keywords — a table named "on"
+// is invalid in DuckDB too, so generating one only tests the generator.
+const ident = fc
+  .stringMatching(/^[a-z][a-z0-9_]{0,8}$/)
+  .filter((s) => !DUCKDB_KEYWORDS.has(s));
 const intVal = fc.integer({ min: -1000, max: 1000 }).map((v) => ({ v }));
 const strVal = fc
   .stringMatching(/^[a-zA-Z0-9 _-]{0,15}$/)
@@ -229,6 +235,147 @@ describe("DuckDB generative: emitted SQL is always valid", () => {
           qualify: ["=", ["over", ["%row_number"], { "partition-by": [col] }], { v: n }],
         });
       }),
+      { numRuns: RUNS }
+    );
+  });
+});
+
+// --- generators for the extended construct set ------------------------------
+
+/** MAP literal with expression keys. */
+const mapLiteral: fc.Arbitrary<SqlExpr> = fc
+  .uniqueArray(fc.tuple(strVal, intVal), { minLength: 1, maxLength: 4, selector: ([k]) => JSON.stringify(k) })
+  .map((pairs) => ["map", ...pairs] as SqlExpr);
+
+/** Field access on a struct literal, possibly chained. */
+const fieldAccess: fc.Arbitrary<SqlExpr> = fc
+  .tuple(ident, intVal, fc.boolean())
+  .map(([name, v, chain]) => {
+    const base: SqlExpr = ["field", ["struct", [name, chain ? ["struct", [name, v]] : v]], name];
+    return chain ? (["field", base, name] as SqlExpr) : base;
+  });
+
+/** COLLATE over a column. */
+const collateExpr: fc.Arbitrary<SqlExpr> = fc
+  .tuple(ident, fc.constantFrom("NOCASE", "NOACCENT", "C"))
+  .map(([c, coll]) => ["collate", c, coll] as SqlExpr);
+
+/** Integer division chains. */
+const intDivExpr: fc.Arbitrary<SqlExpr> = fc
+  .tuple(fc.integer({ min: 1, max: 1000 }), fc.integer({ min: 1, max: 9 }), fc.boolean())
+  .map(([a, b, chain]) => {
+    const base: SqlExpr = ["//", { v: a }, { v: b }];
+    return chain ? (["//", base, { v: b }] as SqlExpr) : base;
+  });
+
+/** Window frame over-spec. */
+const frameExpr: fc.Arbitrary<SqlExpr> = fc
+  .tuple(
+    fc.constantFrom("rows", "range", "groups"),
+    fc.constantFrom("UNBOUNDED PRECEDING", "1 PRECEDING", "CURRENT ROW"),
+    fc.constantFrom("CURRENT ROW", "1 FOLLOWING", "UNBOUNDED FOLLOWING"),
+    fc.option(fc.constantFrom("current-row", "ties", "group", "no-others"), { nil: undefined })
+  )
+  .map(([units, start, end, exclude]) => {
+    const frame: Record<string, unknown> = { units, start, end };
+    if (exclude) frame.exclude = exclude;
+    // RANGE with offset bounds needs an ORDER BY of the right type; keep the
+    // spec well-formed by always ordering.
+    return ["over", ["%count", "*"], { "order-by": [["a", "asc"]], frame }] as SqlExpr;
+  });
+
+/** GROUPING SETS over one or two columns. */
+const groupingSetsExpr: fc.Arbitrary<SqlExpr> = fc
+  .uniqueArray(ident, { minLength: 1, maxLength: 2 })
+  .map((cols) => ["grouping-sets", cols, ...cols.map((c) => [c]), []] as SqlExpr);
+
+describe("DuckDB generative: extended constructs", () => {
+  test("map literals", async () => {
+    await fc.assert(
+      fc.asyncProperty(mapLiteral, async (expr) => {
+        await accepts({ select: [expr] });
+      }),
+      { numRuns: RUNS }
+    );
+  });
+
+  test("field access", async () => {
+    await fc.assert(
+      fc.asyncProperty(fieldAccess, async (expr) => {
+        await accepts({ select: [expr] });
+      }),
+      { numRuns: RUNS }
+    );
+  });
+
+  test("collate", async () => {
+    await fc.assert(
+      fc.asyncProperty(collateExpr, async (expr) => {
+        await accepts({ select: [expr], from: ["t"] });
+      }),
+      { numRuns: RUNS }
+    );
+  });
+
+  test("integer division", async () => {
+    await fc.assert(
+      fc.asyncProperty(intDivExpr, async (expr) => {
+        await accepts({ select: [expr] });
+      }),
+      { numRuns: RUNS }
+    );
+  });
+
+  test("window frames", async () => {
+    await fc.assert(
+      fc.asyncProperty(frameExpr, async (expr) => {
+        await accepts({ select: [expr], from: ["t"] });
+      }),
+      { numRuns: RUNS }
+    );
+  });
+
+  test("grouping sets", async () => {
+    await fc.assert(
+      fc.asyncProperty(groupingSetsExpr, async (expr) => {
+        await accepts({ select: [{ v: 1 }], from: ["t"], "group-by": [expr] });
+      }),
+      { numRuns: RUNS }
+    );
+  });
+
+  test("sample specs", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.record({
+          value: fc.integer({ min: 1, max: 100 }),
+          unit: fc.constantFrom("%", "rows") as fc.Arbitrary<"%" | "rows">,
+          seed: fc.option(fc.integer({ min: 0, max: 999 }), { nil: undefined }),
+        }),
+        async (spec) => {
+          const clean = spec.seed === undefined
+            ? { value: spec.value, unit: spec.unit }
+            : spec;
+          await accepts({ select: ["*"], from: ["t"], sample: clean });
+        }
+      ),
+      { numRuns: RUNS }
+    );
+  });
+
+  test("join variants round-trip through parse", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom("ASOF JOIN", "SEMI JOIN", "ANTI JOIN"),
+        ident,
+        ident,
+        async (kind, t1, t2) => {
+          if (t1 === t2) return;
+          const sql = `SELECT * FROM ${t1} ${kind} ${t2} ON ${t1}.i >= ${t2}.i`;
+          const clause = fromSql(sql, { dialect: "duckdb" });
+          await accepts(clause);
+        }
+      ),
       { numRuns: RUNS }
     );
   });

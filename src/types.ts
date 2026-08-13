@@ -371,6 +371,13 @@ const clauseKeys = new Set([
   "union", "union-all", "intersect", "except", "except-all",
   "create-table", "drop-table", "alter-table", "truncate",
   "raw", "nest", "for", "lock", "window", "partition-by",
+  // DuckDB dialect clause keys — without these, a single-key clause map like
+  // {describe: "t"} would be misread as the typed value 't'::describe.
+  "describe", "summarize", "show", "pivot", "unpivot",
+  "qualify", "sample", "by-name", "frame",
+  "insert-or-replace-into", "insert-or-ignore-into",
+  "asof-join", "asof-left-join", "asof-right-join", "asof-full-join",
+  "asof-inner-join", "semi-join", "anti-join", "positional-join",
 ]);
 
 /**

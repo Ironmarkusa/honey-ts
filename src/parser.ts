@@ -43,6 +43,11 @@ import {
   type Name,
 } from "pgsql-ast-parser";
 import { preprocessDuckDb, reviveSentinels } from "./duckdb-preprocess.js";
+import {
+  parseDuckDbStatement,
+  type StatementParseContext,
+} from "./duckdb-statements.js";
+import type { DuckDBClause } from "./duckdb-types.js";
 
 /** Options for fromSql. */
 export interface FromSqlOptions {
@@ -220,12 +225,7 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
     case "cast": {
       const cast = expr as ExprCast;
       const value = exprToClause(cast.operand);
-      const typeDef = cast.to as { name?: string; kind?: string; config?: number[] };
-      let typeName = typeDef.name ?? typeDef.kind ?? "unknown";
-      if (typeDef.config && typeDef.config.length > 0) {
-        typeName = `${typeName}(${typeDef.config.join(",")})`;
-      }
-      return ["cast", value, typeName];
+      return ["cast", value, typeDefToName(cast.to)];
     }
 
     case "list": {
@@ -387,9 +387,58 @@ function fromToClause(froms: From[] | undefined): SqlExpr[] | undefined {
       return subquery;
     }
 
+    // Table function call: FROM range(10) AS tbl(i), FROM read_parquet(...).
+    // Previously fell through to the raw fallback, which silently dropped the
+    // alias and column names.
+    if (f.type === "call") {
+      const call = f as unknown as {
+        function: { name: string };
+        args: Expr[];
+        alias?: { name: string; columns?: Array<{ name: string }> };
+      };
+      const expr: SqlExpr = [`%${call.function.name}`, ...call.args.map(exprToClause)];
+      if (call.alias) {
+        const cols = call.alias.columns?.map((c) => c.name);
+        if (cols?.length) return [expr, [call.alias.name, ...cols]];
+        return [expr, call.alias.name];
+      }
+      return expr;
+    }
+
     // For joins and other complex froms, use the first part
     return { __raw: astToSql.from(f) };
   });
+}
+
+/**
+ * Render a parsed type definition back to a type-name string.
+ *
+ * Handles three shapes the old inline code got wrong:
+ *  - array types: {kind: "array", arrayOf: {name: "int"}} -> "int[]"
+ *    (previously collapsed to the meaningless "array");
+ *  - quoted types: {name: '...""...', doubleQuoted: true} keeps the doubled
+ *    quotes from the source text, which must be undoubled;
+ *  - precision arguments: {name: "numeric", config: [7, 4]} -> "numeric(7,4)".
+ */
+function typeDefToName(to: unknown): string {
+  const typeDef = to as {
+    name?: string;
+    kind?: string;
+    config?: number[];
+    arrayOf?: unknown;
+    doubleQuoted?: boolean;
+  };
+  if (typeDef.kind === "array" && typeDef.arrayOf) {
+    return `${typeDefToName(typeDef.arrayOf)}[]`;
+  }
+  let typeName = typeDef.name ?? typeDef.kind ?? "unknown";
+  if (typeDef.doubleQuoted) {
+    typeName = typeName.replace(/""/g, '"');
+  }
+  if (typeDef.config && typeDef.config.length > 0) {
+    typeName = `${typeName}(${typeDef.config.join(",")})`;
+  }
+  return typeName;
 }
 
 /**
@@ -401,10 +450,11 @@ function joinsToClause(froms: From[] | undefined): [string, [SqlExpr, SqlExpr][]
   const joins: [string, [SqlExpr, SqlExpr][]][] = [];
 
   for (const f of froms) {
-    if (f.type === "table" && (f as FromTable).join) {
-      const table = f as FromTable;
-      const joinInfo = table.join!;
-
+    const joinInfo = (f as { join?: FromTable["join"] }).join;
+    // Joins hang off table entries AND statement entries — `JOIN (SELECT ...)
+    // s ON ...` used to be silently dropped into a comma cross-join because
+    // only table-type entries were checked here.
+    if (joinInfo && (f.type === "table" || f.type === "statement")) {
       const joinType = (joinInfo.type ?? "INNER JOIN").toUpperCase();
       const clauseKey =
         joinType.includes("LEFT")
@@ -417,12 +467,23 @@ function joinsToClause(froms: From[] | undefined): [string, [SqlExpr, SqlExpr][]
           ? "cross-join"
           : "join";
 
-      const tableName = nameToIdent(table.name);
-      const tableExpr: SqlExpr = table.name.alias
-        ? [tableName, table.name.alias]
-        : tableName;
+      let tableExpr: SqlExpr;
+      if (f.type === "table") {
+        const table = f as FromTable;
+        const tableName = nameToIdent(table.name);
+        tableExpr = table.name.alias ? [tableName, table.name.alias] : tableName;
+      } else {
+        const stmt = f as FromStatement;
+        const sub = statementToClause(stmt.statement as Statement);
+        tableExpr = stmt.alias ? [sub, stmt.alias] : (sub as SqlExpr);
+      }
 
-      const condition = exprToClause(joinInfo.on);
+      // JOIN ... USING (a, b) — previously dropped on the floor, silently
+      // turning an equi-join into a bare INNER JOIN with no condition.
+      const joinUsing = (joinInfo as unknown as { using?: Array<{ name: string }> }).using;
+      const condition: SqlExpr = joinUsing?.length
+        ? ["using", ...joinUsing.map((u) => u.name)]
+        : exprToClause(joinInfo.on);
 
       // Find or create the join array for this type
       let joinArr = joins.find(([k]) => k === clauseKey);
@@ -479,9 +540,20 @@ function selectToClause(stmt: SelectFromStatement): SqlClause {
     const joinTables = stmt.from.filter(
       (f) => f.type === "table" && (f as FromTable).join
     );
-    const subqueries = stmt.from.filter((f) => f.type === "statement");
+    // Joined statements belong to joinsToClause, not the FROM list.
+    const subqueries = stmt.from.filter(
+      (f) => f.type === "statement" && !(f as { join?: unknown }).join
+    );
+    // Table function calls: FROM range(10), FROM read_parquet('x'). These were
+    // silently dropped before — the filters above only passed tables and
+    // subqueries.
+    const calls = stmt.from.filter((f) => (f as { type: string }).type === "call");
 
-    const fromItems = [...fromToClause(baseTables) ?? [], ...fromToClause(subqueries) ?? []];
+    const fromItems = [
+      ...(fromToClause(baseTables) ?? []),
+      ...(fromToClause(subqueries) ?? []),
+      ...(fromToClause(calls) ?? []),
+    ];
     if (fromItems.length > 0) {
       // Only unwrap if single item AND it's a simple identifier (not [table, alias])
       if (fromItems.length === 1 && typeof fromItems[0] === "string") {
@@ -491,8 +563,11 @@ function selectToClause(stmt: SelectFromStatement): SqlClause {
       }
     }
 
-    // JOINs
-    const joins = joinsToClause(joinTables);
+    // JOINs — both joined tables and joined subqueries.
+    const joinedStatements = stmt.from.filter(
+      (f) => f.type === "statement" && (f as { join?: unknown }).join
+    );
+    const joins = joinsToClause([...joinTables, ...joinedStatements]);
     for (const [key, pairs] of joins) {
       (clause as Record<string, unknown>)[key] = pairs;
     }
@@ -732,10 +807,41 @@ function withToClause(stmt: WithStatement): SqlClause {
  * // => { select: [":id", ":name"], from: ":users", where: ["=", ":active", true] }
  * ```
  */
+/**
+ * Callbacks handed to the DuckDB statement mini-parser and sentinel revival —
+ * both re-enter fromSql for nested statements and expressions.
+ */
+const duckDbStatementCtx: StatementParseContext = {
+  parseSub: (sql) => fromSql(sql, { dialect: "duckdb" }),
+  parseExpr: (sql) => {
+    const clause = fromSql(`SELECT ${sql}`, { dialect: "duckdb" });
+    return (clause.select as SqlExpr[])[0]!;
+  },
+  parseSelectItem: (sql) => {
+    const clause = fromSql(`SELECT ${sql}`, { dialect: "duckdb" });
+    return (clause.select as SqlExpr[])[0]!;
+  },
+};
+
+export function fromSql(
+  sql: string,
+  options: FromSqlOptions & { dialect: "duckdb" }
+): DuckDBClause;
+export function fromSql(sql: string, options?: FromSqlOptions): SqlClause;
 export function fromSql(sql: string, options: FromSqlOptions = {}): SqlClause {
   if (options.dialect === "duckdb") {
+    // Statement forms with no PostgreSQL analogue (PIVOT, DESCRIBE, SHOW, ...)
+    // never reach the PostgreSQL parser at all.
+    const dispatched = parseDuckDbStatement(sql, duckDbStatementCtx);
+    if (dispatched) return dispatched as DuckDBClause;
+
     const stmt = parseFirst(preprocessDuckDb(sql));
-    return reviveSentinels(statementToClause(stmt)) as SqlClause;
+    return reviveSentinels(statementToClause(stmt), {
+      parseStatement: (raw) => {
+        const parsed = parseDuckDbStatement(raw, duckDbStatementCtx);
+        return parsed ?? fromSql(raw, { dialect: "duckdb" });
+      },
+    }) as DuckDBClause;
   }
   const stmt = parseFirst(sql);
   return statementToClause(stmt);
