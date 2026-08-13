@@ -10,6 +10,7 @@ import type { SqlClause, SqlExpr } from "../types.js";
 import type { Matcher } from "./matchers.js";
 import { identParts, identString } from "./matchers.js";
 import { mapClauseTree, mapExprTree } from "./walk.js";
+import { extractTableAliases } from "../analyze.js";
 
 export type Replacement<T = SqlExpr> = T | ((hit: T) => T | null);
 
@@ -338,5 +339,170 @@ export function replaceFunction(
       next[key] = mapExprTree(next[key] as SqlExpr, rewrite) as never;
     }
     return next;
+  });
+}
+/**
+ * Get the canonical table.column form for a select item.
+ * Resolves aliases to actual table names using the alias map.
+ *
+ * Returns: [resolvedName, outputAlias] or null
+ * - "u.email" with alias u->users -> ["users.email", "email"]
+ * - "email" -> ["email", "email"]
+ * - ["u.email", "email_hash"] -> ["users.email", "email_hash"]
+ */
+function resolveSelectItem(
+  item: SqlExpr,
+  aliasMap: Map<string, string>
+): { resolved: string; outputAlias: string } | null {
+  // {ident: ["u", "email"]} — the parser's form for qualified columns.
+  // Without this, overrideSelects silently missed every qualified column in
+  // a fromSql() result and only worked on hand-built string clauses.
+  const parts = identParts(item);
+  if (parts && typeof item !== "string") {
+    return resolveSelectItem(parts.join("."), aliasMap);
+  }
+
+  // Bare column string
+  if (typeof item === "string") {
+    if (item.includes(".")) {
+      // Qualified: "u.email"
+      const dotIdx = item.indexOf(".");
+      const tableAlias = item.substring(0, dotIdx);
+      const column = item.substring(dotIdx + 1);
+      const tableName = aliasMap.get(tableAlias) ?? tableAlias;
+      return {
+        resolved: `${tableName}.${column}`,
+        outputAlias: column,
+      };
+    }
+    // Unqualified: "email"
+    return { resolved: item, outputAlias: item };
+  }
+
+  // Array form: could be [expr, alias] or just an expression
+  if (Array.isArray(item) && item.length === 2) {
+    const [first, second] = item;
+    // If second element is a string identifier (not starting with %), it's an alias
+    if (typeof second === "string" && !second.startsWith("%")) {
+      // Recurse on the expression part to resolve it
+      if (typeof first === "string") {
+        const innerResolved = resolveSelectItem(first, aliasMap);
+        if (innerResolved) {
+          return {
+            resolved: innerResolved.resolved,
+            outputAlias: second, // explicit alias overrides
+          };
+        }
+      }
+      // Expression with alias but can't resolve the expression
+      return { resolved: second, outputAlias: second };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Override select items by table.column or alias.
+ *
+ * Resolves table aliases to actual table names, so you can specify overrides
+ * using the real table name regardless of what alias the query uses.
+ *
+ * @example
+ * ```ts
+ * // LLM generates with alias: SELECT u.email FROM users u
+ * const clause = fromSql("SELECT u.email FROM users u");
+ *
+ * // Override using actual table name (not the alias)
+ * const fixed = overrideSelects(clause, {
+ *   "users.email": raw("SHA256(LOWER(TRIM(u.email)))")
+ * });
+ *
+ * // Result: SELECT SHA256(LOWER(TRIM(u.email))) AS email FROM users u
+ * ```
+ *
+ * @example
+ * ```ts
+ * // Also matches by output alias
+ * const clause = fromSql("SELECT email AS email_hash FROM users");
+ * const fixed = overrideSelects(clause, {
+ *   email_hash: ["%sha256", "email"]
+ * });
+ * ```
+ *
+ * Matching priority:
+ * 1. Resolved table.column (e.g., "users.email" matches "u.email" when u->users)
+ * 2. Unqualified column name (e.g., "email")
+ * 3. Explicit alias (e.g., "email_hash")
+ */
+export function overrideSelects(
+  clause: SqlClause,
+  overrides: Record<string, SqlExpr>
+): SqlClause {
+  const result = { ...clause };
+  const aliasMap = extractTableAliases(clause);
+
+  // Handle all select variants
+  for (const key of ["select", "select-distinct", "select-distinct-on"] as const) {
+    const selectValue = result[key];
+    if (!selectValue) continue;
+
+    if (key === "select-distinct-on") {
+      // Format: [onExprs, ...selectExprs]
+      const arr = selectValue as SqlExpr[];
+      const onExprs = arr[0];
+      const selectExprs = arr.slice(1);
+      const transformed = transformSelectItems(selectExprs, overrides, aliasMap);
+      (result as Record<string, unknown>)[key] = [onExprs, ...transformed];
+    } else {
+      // Regular select or select-distinct
+      const items = Array.isArray(selectValue) ? selectValue : [selectValue];
+      result[key] = transformSelectItems(items as SqlExpr[], overrides, aliasMap);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Transform select items, applying overrides.
+ * Uses alias map to resolve table aliases to actual table names.
+ */
+function transformSelectItems(
+  items: SqlExpr[],
+  overrides: Record<string, SqlExpr>,
+  aliasMap: Map<string, string>
+): SqlExpr[] {
+  return items.map((item) => {
+    const resolved = resolveSelectItem(item, aliasMap);
+    if (!resolved) return item;
+
+    const { resolved: resolvedName, outputAlias } = resolved;
+
+    // Try matches in priority order:
+    // 1. Exact resolved name (e.g., "users.email")
+    // 2. Just the column part (e.g., "email")
+    // 3. The output alias if different (e.g., "email_hash")
+    const candidates = [resolvedName];
+
+    // Add unqualified column if it's a qualified name
+    if (resolvedName.includes(".")) {
+      const column = resolvedName.substring(resolvedName.indexOf(".") + 1);
+      if (!candidates.includes(column)) candidates.push(column);
+    }
+
+    // Add output alias if different
+    if (!candidates.includes(outputAlias)) {
+      candidates.push(outputAlias);
+    }
+
+    for (const candidate of candidates) {
+      if (candidate in overrides) {
+        const newExpr = overrides[candidate];
+        return [newExpr, outputAlias] as SqlExpr;
+      }
+    }
+
+    return item;
   });
 }

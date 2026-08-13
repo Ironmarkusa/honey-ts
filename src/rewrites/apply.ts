@@ -9,7 +9,7 @@
  * ```ts
  * const out = apply(
  *   clause,
- *   (c) => injectWhere(c, ["=", "tenant_id", { $: tenantId }]),
+ *   (c) => modify.addWhere(c, ["=", "tenant_id", { $: tenantId }]),
  *   (c) => rewriteDateRange(c, { column: "date", from, to }),
  *   (c) => addWhere(c, ["=", "region", { $: region }]),
  * );

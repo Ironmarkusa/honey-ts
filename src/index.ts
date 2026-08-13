@@ -1,24 +1,32 @@
 /**
- * HoneySQL TypeScript Port
+ * honey-ts — SQL as data structures for TypeScript.
  *
- * A TypeScript implementation of HoneySQL - representing SQL as data structures.
+ * The API is organized in layers:
+ *
+ *   1. **Core**: `fromSql` parses SQL into a plain-data clause map;
+ *      `toSql`/`format` turns a clause map back into parameterized SQL.
+ *      Both take a dialect (`postgres` default, `duckdb` fully supported).
+ *   2. **Value constructors**: `$()`, `literal()`, `raw()`, `param()`,
+ *      `lift()`, `ident()` — build the special value shapes without
+ *      hand-writing wrapper objects.
+ *   3. **Manipulation** (the `find` / `modify` / `rewrite` / `matchers`
+ *      namespaces + `apply`): matcher-based, immutable, subquery-aware
+ *      transforms. This is THE way to manipulate clause trees.
+ *   4. **Analysis** (the `analyze` namespace): read-only introspection —
+ *      aliases, select provenance, referenced columns.
+ *   5. **Guard**: allow-list validation for LLM-generated SQL.
+ *   6. **Builder**: schema-aware suggestions for query-building UIs.
+ *   7. **Dialects**: `duckdb.*` typed constructs, `registerDialect`.
  *
  * @example
  * ```ts
- * import { toSql, fromSql, injectWhere, overrideSelects, raw } from 'honey-ts';
+ * import { fromSql, toSql, modify, matchers, $ } from 'honey-ts';
  *
- * // LLM generates SQL
  * const clause = fromSql("SELECT u.email FROM users u WHERE status = 'active'");
  *
- * // Override computed columns using schema table names
- * const fixed = overrideSelects(clause, {
- *   "users.email": raw("SHA256(LOWER(TRIM(u.email)))")
- * });
+ * // Inject tenant isolation into every subquery (joins included)
+ * const secured = modify.addWhere(clause, ["=", "tenant_id", $(tenantId)]);
  *
- * // Inject tenant isolation into all subqueries
- * const secured = injectWhere(fixed, ["=", "tenant_id", { $: tenantId }]);
- *
- * // Back to parameterized SQL
  * const [sql, ...params] = toSql(secured);
  * ```
  *
@@ -26,44 +34,71 @@
  * Original Copyright (c) 2020-2025 Sean Corfield
  */
 
-// Core SQL formatting
-export {
-  format,
-  format as toSql,
-  formatExpr,
-  formatDsl,
-  formatExprList,
-  formatEntity,
-  sqlKw,
-  registerClause,
-  registerFn,
-  registerOp,
-  clauseOrder,
-  raw,
-  param,
-  lift,
-  literal,
-} from "./sql.js";
+// ============================================================================
+// 1. Core — parse and format
+// ============================================================================
 
-// SQL parsing
+export { format, format as toSql } from "./sql.js";
 export { fromSql, fromSqlMulti, normalizeSql } from "./parser.js";
+export type { FromSqlOptions } from "./parser.js";
 
-// Query manipulation
-export {
-  walkClauses,
-  injectWhere,
-  overrideSelects,
-  getTableAliases,
-  getSelectAliases,
-  analyzeSelects,
-  getReferencedColumns,
-} from "./helpers.js";
+// ============================================================================
+// 2. Value constructors
+// ============================================================================
 
-export type { AliasScope, SelectItemAnalysis, SelectAnalysisScope } from "./helpers.js";
+export { $, raw, param, lift, literal, ident, mapEquals } from "./sql.js";
 
-// Schema-aware query builder
+// ============================================================================
+// 3. Manipulation — matcher-based, immutable, subquery-aware
+// ============================================================================
+
+export * as find from "./rewrites/find.js";
+export * as modify from "./rewrites/modify.js";
+export * as rewrite from "./rewrites/rewrite.js";
+export * as matchers from "./rewrites/matchers.js";
+
+export { apply, applyWith } from "./rewrites/apply.js";
+export type { ClauseTransform, ApplyOptions } from "./rewrites/apply.js";
+
+// Walk primitives, for transforms the namespaces don't cover.
+export { walkClauseTree, mapClauseTree, mapExprTree } from "./rewrites/walk.js";
+export type { ClauseVisitor } from "./rewrites/walk.js";
+
+export { rewriteDateRange, describeDatePredicates } from "./rewrites/date-range.js";
+export type {
+  DatePredicate,
+  RangeStrategy,
+  RewriteDateRangeSpec,
+} from "./rewrites/date-range.js";
+
+export type { Matcher, MatchContext } from "./rewrites/matchers.js";
+export type { Hit, TableHit, JoinHit, SelectHit } from "./rewrites/find.js";
+export type { Replacement } from "./rewrites/rewrite.js";
+export type { AddWhereOptions, AddOrderByOptions } from "./rewrites/modify.js";
+
+// ============================================================================
+// 4. Analysis — read-only introspection
+// ============================================================================
+
+export * as analyze from "./analyze.js";
+export type {
+  AliasScope,
+  SelectItemAnalysis,
+  SelectAnalysisScope,
+} from "./analyze.js";
+
+// ============================================================================
+// 5. Guard — allow-list validation for LLM-generated SQL
+// ============================================================================
+
+export { guardSql, getOperation, collectTables, isTautology } from "./guard.js";
+export type { GuardConfig, GuardResult, SqlOperation } from "./guard.js";
+
+// ============================================================================
+// 6. Builder — schema-aware suggestions for UIs
+// ============================================================================
+
 export { createQueryBuilder } from "./builder.js";
-
 export type {
   ColumnSchema,
   TableSchema,
@@ -74,78 +109,10 @@ export type {
   ValidationResult,
 } from "./builder.js";
 
-// SQL guard (LLM validation)
-export {
-  guardSql,
-  getOperation,
-  collectTables,
-  isTautology,
-} from "./guard.js";
+// ============================================================================
+// 7. Dialects
+// ============================================================================
 
-export type { GuardConfig, GuardResult, SqlOperation } from "./guard.js";
-
-// Types
-export type {
-  SqlExpr,
-  SqlClause,
-  SqlIdent,
-  SqlParam,
-  SqlRaw,
-  SqlLift,
-  SqlLiteral,
-  FormatResult,
-  FormatOptions,
-  DialectConfig,
-  SelectClause,
-  FromClause,
-  JoinClause,
-  WhereClause,
-  OrderByClause,
-  GroupByClause,
-  ValuesClause,
-  SetClause,
-  WithClause,
-  OnConflictClause,
-  ReturningClause,
-} from "./types.js";
-
-// Type guards
-export {
-  isIdent,
-  isParam,
-  isRaw,
-  isLift,
-  isLiteral,
-  isClause,
-  isExprArray,
-} from "./types.js";
-
-// Zod schemas for runtime validation
-export {
-  SqlIdentSchema,
-  SqlParamSchema,
-  SqlRawSchema,
-  SqlLiftSchema,
-  SqlLiteralSchema,
-  SqlExprSchema,
-  SqlClauseSchema,
-  FormatOptionsSchema,
-} from "./types.js";
-
-// PostgreSQL operators (auto-registered)
-import "./pg-ops.js";
-
-// Re-export PG helper functions
-export {
-  jsonbContains,
-  jsonbPath,
-  arrayOverlaps,
-  regexMatch,
-  textSearch,
-} from "./pg-ops.js";
-
-// Dialect registration. The built-in dialects (including duckdb) are always
-// available via format(clause, {dialect}); registerDialect adds custom ones.
 export { registerDialect, getDialect } from "./sql.js";
 
 // DuckDB construct types, guards and typed constructors. Namespaced because
@@ -175,40 +142,79 @@ export type {
   DuckDBSampleSpec,
   DuckDBPivotSpec,
 } from "./duckdb-types.js";
-export type { FromSqlOptions } from "./parser.js";
+
+// PostgreSQL operators (auto-registered) and expression helpers.
+import "./pg-ops.js";
+export {
+  jsonbContains,
+  jsonbPath,
+  arrayOverlaps,
+  regexMatch,
+  textSearch,
+} from "./pg-ops.js";
 
 // ============================================================================
-// Rewrites layer — find/rewrite/modify/apply helpers for clause trees.
-// Power the "parse → a couple of helpers → unparse" philosophy for dynamic SQL.
+// Types and runtime validation
 // ============================================================================
 
-export * as matchers from "./rewrites/matchers.js";
-export * as find from "./rewrites/find.js";
-export * as rewrite from "./rewrites/rewrite.js";
-export * as modify from "./rewrites/modify.js";
-
-export { apply, applyWith } from "./rewrites/apply.js";
-export type { ClauseTransform, ApplyOptions } from "./rewrites/apply.js";
+export type {
+  SqlExpr,
+  SqlClause,
+  SqlIdent,
+  SqlParam,
+  SqlRaw,
+  SqlLift,
+  SqlLiteral,
+  FormatResult,
+  FormatOptions,
+  DialectConfig,
+  SelectClause,
+  FromClause,
+  JoinClause,
+  WhereClause,
+  OrderByClause,
+  GroupByClause,
+  ValuesClause,
+  SetClause,
+  WithClause,
+  OnConflictClause,
+  ReturningClause,
+} from "./types.js";
 
 export {
-  rewriteDateRange,
-  describeDatePredicates,
-} from "./rewrites/date-range.js";
-export type {
-  DatePredicate,
-  RangeStrategy,
-  RewriteDateRangeSpec,
-} from "./rewrites/date-range.js";
+  isIdent,
+  isParam,
+  isRaw,
+  isLift,
+  isLiteral,
+  isClause,
+  isExprArray,
+} from "./types.js";
 
-export type { Matcher, MatchContext } from "./rewrites/matchers.js";
-export type {
-  Hit,
-  TableHit,
-  JoinHit,
-  SelectHit,
-} from "./rewrites/find.js";
-export type { Replacement } from "./rewrites/rewrite.js";
-export type {
-  AddWhereOptions,
-  AddOrderByOptions,
-} from "./rewrites/modify.js";
+export {
+  SqlIdentSchema,
+  SqlParamSchema,
+  SqlRawSchema,
+  SqlLiftSchema,
+  SqlLiteralSchema,
+  SqlExprSchema,
+  SqlClauseSchema,
+  FormatOptionsSchema,
+} from "./types.js";
+
+// ============================================================================
+// Extension API — for registering custom clauses, functions, and operators.
+// These expose formatter internals; most applications never need them.
+// ============================================================================
+
+export {
+  registerClause,
+  registerFn,
+  registerOp,
+  clauseOrder,
+  formatExpr,
+  formatDsl,
+  formatExprList,
+  formatEntity,
+  sqlKw,
+} from "./sql.js";

@@ -25,7 +25,7 @@ export interface AddWhereOptions {
 
 /**
  * AND a predicate into a WHERE clause. Default scope is "all" — matches
- * `injectWhere` semantics for tenant isolation. Set `scope: "root"` to only
+ * tenant-isolation semantics (every subquery, joins included). Set `scope: "root"` to only
  * affect the outer query.
  */
 export function addWhere(

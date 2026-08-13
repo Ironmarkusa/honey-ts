@@ -1,10 +1,14 @@
 /**
- * Tests for query manipulation helpers.
+ * Tests for the analysis namespace and the rewrite-layer functions that
+ * replaced the old helpers module (overrideSelects, addWhere).
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { overrideSelects, injectWhere, getSelectAliases, analyzeSelects, getReferencedColumns, fromSql } from "./index.js";
+import { analyze, rewrite, modify, fromSql } from "./index.js";
+const { getSelectAliases, analyzeSelects, getReferencedColumns } = analyze;
+const { overrideSelects } = rewrite;
+const injectWhere = modify.addWhere;
 import type { SqlClause } from "./types.js";
 
 describe("overrideSelects", () => {
@@ -544,5 +548,26 @@ describe("getReferencedColumns", () => {
     assert.ok(cols.includes("a"));
     assert.ok(cols.includes("b"));
     assert.ok(!cols.includes("and"));
+  });
+});
+
+describe("overrideSelects on parsed queries", () => {
+  // Regression: the parser emits qualified columns as {ident: ["u","email"]},
+  // which resolveSelectItem only handled as strings — so the README's
+  // flagship override example silently did nothing on fromSql() output.
+  it("matches {ident} qualified columns from fromSql", () => {
+    const clause = fromSql("SELECT u.email FROM users u");
+    const result = overrideSelects(clause, {
+      "users.email": { __raw: "SHA256(u.email)" },
+    });
+    const json = JSON.stringify(result.select);
+    assert.ok(json.includes("SHA256"), json);
+    assert.ok(json.includes("email"), "keeps output alias");
+  });
+
+  it("matches aliased {ident} items by output alias", () => {
+    const clause = fromSql("SELECT u.email AS e FROM users u");
+    const result = overrideSelects(clause, { e: { __raw: "SHA256(u.email)" } });
+    assert.ok(JSON.stringify(result.select).includes("SHA256"));
   });
 });

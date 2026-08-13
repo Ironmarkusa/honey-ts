@@ -27,12 +27,12 @@ clause.where = ["and", clause.where, ["=", "tenant_id", { $: tenantId }]];
 
 ## The Solution
 
-`walkClauses()` recursively visits every clause in the query tree:
+`mapClauseTree()` recursively visits every clause in the query tree:
 
 ```typescript
-import { walkClauses } from 'honey-ts';
+import { mapClauseTree } from 'honey-ts';
 
-const secured = walkClauses(clause, (c) => {
+const secured = mapClauseTree(clause, (c) => {
   if (c.from) {
     // This clause queries a table—add tenant filter
     return {
@@ -48,10 +48,10 @@ const secured = walkClauses(clause, (c) => {
 
 ## API
 
-### `walkClauses(clause, transform)`
+### `mapClauseTree(clause, transform)`
 
 ```typescript
-function walkClauses(
+function mapClauseTree(
   clause: SqlClause,
   transform: (c: SqlClause) => SqlClause
 ): SqlClause;
@@ -72,18 +72,18 @@ function walkClauses(
 
 **Returns:** New clause tree with transforms applied
 
-### `injectWhere(clause, condition)`
+### `modify.addWhere(clause, condition, opts?)`
 
 Convenience wrapper for the most common use case:
 
 ```typescript
-function injectWhere(clause: SqlClause, condition: SqlExpr): SqlClause;
+function addWhere(clause: SqlClause, condition: SqlExpr, opts?: { scope?: "all" | "root" | ((scope: string) => boolean) }): SqlClause;
 ```
 
 Injects the condition into all clauses that have `from`, `delete-from`, or `update`.
 
 ```typescript
-const secured = injectWhere(clause, ["=", "tenant_id", { $: tenantId }]);
+const secured = modify.addWhere(clause, ["=", "tenant_id", $(tenantId)]);
 ```
 
 ## How It Works
@@ -119,7 +119,7 @@ Order of `transform()` calls:
 ### Tenant Isolation
 
 ```typescript
-import { fromSql, format, injectWhere } from 'honey-ts';
+import { fromSql, format, modify, $ } from 'honey-ts';
 
 const llmSql = `
   SELECT * FROM orders
@@ -127,7 +127,7 @@ const llmSql = `
 `;
 
 const clause = fromSql(llmSql);
-const secured = injectWhere(clause, ["=", "tenant_id", { $: "tenant_123" }]);
+const secured = modify.addWhere(clause, ["=", "tenant_id", $("tenant_123")]);
 const [sql] = format(secured, { inline: true });
 
 // Result: Both orders AND users have tenant_id filter
@@ -141,7 +141,7 @@ const [sql] = format(secured, { inline: true });
 Automatically filter out soft-deleted records:
 
 ```typescript
-const withSoftDelete = walkClauses(clause, (c) => {
+const withSoftDelete = mapClauseTree(clause, (c) => {
   if (c.from) {
     const existingWhere = c.where;
     const softDeleteFilter = ["is", "deleted_at", null];
@@ -163,7 +163,7 @@ Collect all tables being queried:
 ```typescript
 const tables: string[] = [];
 
-walkClauses(clause, (c) => {
+mapClauseTree(clause, (c) => {
   if (typeof c.from === "string") {
     tables.push(c.from);
   } else if (Array.isArray(c.from)) {
@@ -184,7 +184,7 @@ console.log("Tables accessed:", tables);
 const allowedTables = new Set(["users", "orders", "products"]);
 
 function validateAllowedTables(clause: SqlClause): void {
-  walkClauses(clause, (c) => {
+  mapClauseTree(clause, (c) => {
     if (typeof c.from === "string" && !allowedTables.has(c.from)) {
       throw new Error(`Unauthorized table: ${c.from}`);
     }
@@ -206,7 +206,7 @@ function validateAllowedTables(clause: SqlClause): void {
 
 ```typescript
 function applyRLS(clause: SqlClause, userId: string): SqlClause {
-  return walkClauses(clause, (c) => {
+  return mapClauseTree(clause, (c) => {
     // Different tables have different RLS rules
     if (c.from === "user_data") {
       const condition = ["=", "owner_id", { $: userId }];
@@ -230,7 +230,7 @@ function applyRLS(clause: SqlClause, userId: string): SqlClause {
 function validateComplexity(clause: SqlClause, maxSubqueries: number): void {
   let subqueryCount = 0;
 
-  walkClauses(clause, (c) => {
+  mapClauseTree(clause, (c) => {
     subqueryCount++;
     if (subqueryCount > maxSubqueries) {
       throw new Error(`Query too complex: ${subqueryCount} subqueries (max: ${maxSubqueries})`);
@@ -242,7 +242,7 @@ function validateComplexity(clause: SqlClause, maxSubqueries: number): void {
 
 ## Handling Expression Trees
 
-`walkClauses` only visits clause maps, not arbitrary expressions. For deep expression inspection, you may need custom traversal:
+`mapClauseTree` only visits clause maps, not arbitrary expressions. For deep expression inspection, you may need custom traversal:
 
 ```typescript
 function walkExpr(expr: SqlExpr, visitor: (e: SqlExpr) => void): void {
@@ -255,7 +255,7 @@ function walkExpr(expr: SqlExpr, visitor: (e: SqlExpr) => void): void {
   } else if (typeof expr === "object" && expr !== null) {
     // Could be a clause (subquery)
     if ("select" in expr || "from" in expr) {
-      walkClauses(expr as SqlClause, (c) => {
+      mapClauseTree(expr as SqlClause, (c) => {
         // Visit expressions within this clause
         if (c.where) walkExpr(c.where as SqlExpr, visitor);
         if (c.select) {
@@ -279,7 +279,7 @@ walkExpr(clause.where, (e) => {
 
 ## Performance Considerations
 
-- `walkClauses` creates new objects (immutable transformation)
+- `mapClauseTree` creates new objects (immutable transformation)
 - For very deep nesting, consider stack depth
 - Caching results is safe since transformations are pure
 
@@ -288,7 +288,7 @@ walkExpr(clause.where, (e) => {
 Log all transformations:
 
 ```typescript
-const secured = walkClauses(clause, (c) => {
+const secured = mapClauseTree(clause, (c) => {
   console.log("Visiting clause:", JSON.stringify(c, null, 2));
   const transformed = addTenantFilter(c);
   console.log("Transformed to:", JSON.stringify(transformed, null, 2));
@@ -314,7 +314,7 @@ function secureQuery(sql: string, tenantId: string): [string, unknown[]] {
   validateComplexity(clause, 10);
 
   // Then transform
-  const secured = injectWhere(clause, ["=", "tenant_id", { $: tenantId }]);
+  const secured = modify.addWhere(clause, ["=", "tenant_id", $(tenantId)]);
 
   // Format and return
   return format(secured);

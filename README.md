@@ -3,7 +3,7 @@
 **SQL as data structures for TypeScript** - A port of [HoneySQL](https://github.com/seancorfield/honeysql) for PostgreSQL and DuckDB.
 
 ```typescript
-import { format, fromSql, injectWhere } from 'honey-ts';
+import { format, fromSql, modify, $ } from 'honey-ts';
 
 // Build SQL from data structures
 const query = {
@@ -20,7 +20,7 @@ const clause = fromSql("SELECT * FROM orders WHERE total > 100");
 // => { select: ["*"], from: "orders", where: [">", "total", { $: 100 }] }
 
 // Inject conditions across all subqueries (tenant isolation!)
-const secured = injectWhere(clause, ["=", "tenant_id", { $: "tenant_123" }]);
+const secured = modify.addWhere(clause, ["=", "tenant_id", $("tenant_123")]);
 ```
 
 ## Why honey-ts?
@@ -36,7 +36,7 @@ The typical LLM SQL workflow is brittle:
 With honey-ts:
 1. LLM generates SQL string (or clause map directly)
 2. Parse to structured data: `fromSql(sql)`
-3. **Inject tenant filters, auth checks** via `walkClauses()` or `injectWhere()`
+3. **Inject tenant filters, auth checks** via `modify.addWhere()` — subquery- and join-aware, deduplicating
 4. Convert back to parameterized SQL: `format(clause)`
 5. Execute with confidence
 
@@ -102,7 +102,7 @@ const [sql, ...params] = format(clause);
 ### Tenant Isolation with Tree Walker
 
 ```typescript
-import { fromSql, format, injectWhere } from 'honey-ts';
+import { fromSql, format, modify, $ } from 'honey-ts';
 
 // LLM-generated SQL with subqueries
 const llmSql = `
@@ -112,7 +112,7 @@ const llmSql = `
 
 // Parse and inject tenant filter into ALL queries (including subqueries!)
 const clause = fromSql(llmSql);
-const secured = injectWhere(clause, ["=", "tenant_id", { $: tenantId }]);
+const secured = modify.addWhere(clause, ["=", "tenant_id", $(tenantId)]);
 
 // Both orders and users tables now have tenant_id filter
 const [sql, ...params] = format(secured);

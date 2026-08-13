@@ -503,24 +503,24 @@ const query = {
 ### Tenant Isolation
 
 ```typescript
-import { fromSql, format, injectWhere } from 'honey-ts';
+import { fromSql, format, modify } from 'honey-ts';
 
 const llmSql = "SELECT * FROM orders WHERE total > 100";
 const clause = fromSql(llmSql);
-const secured = injectWhere(clause, ["=", "tenant_id", { $: currentTenantId }]);
+const secured = modify.addWhere(clause, ["=", "tenant_id", { $: currentTenantId }]);
 const [sql, ...params] = format(secured);
 ```
 
 ### Whitelist Tables
 
 ```typescript
-import { walkClauses } from 'honey-ts';
+import { mapClauseTree } from 'honey-ts';
 
 const allowedTables = new Set(["users", "orders", "products"]);
 
 function validateTables(clause: SqlClause): boolean {
   let valid = true;
-  walkClauses(clause, (c) => {
+  mapClauseTree(clause, (c) => {
     if (typeof c.from === "string" && !allowedTables.has(c.from)) {
       valid = false;
     }

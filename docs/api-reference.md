@@ -75,14 +75,14 @@ normalizeSql("select ID from USERS") === normalizeSql("SELECT id FROM users")
 
 ## Tree Walking
 
-### `walkClauses(clause, transform)`
+### `mapClauseTree(clause, transform)`
 
 Recursively walks all clause nodes, applying a transform function. Handles CTEs, UNIONs, and subqueries.
 
 ```typescript
-import { walkClauses } from 'honey-ts';
+import { mapClauseTree } from 'honey-ts';
 
-const transformed = walkClauses(clause, (c) => {
+const transformed = mapClauseTree(clause, (c) => {
   // c is each clause in the tree (including subqueries)
   if (c.from) {
     // Add condition to all clauses with FROM
@@ -92,14 +92,14 @@ const transformed = walkClauses(clause, (c) => {
 });
 ```
 
-### `injectWhere(clause, condition)`
+### `modify.addWhere(clause, condition)`
 
 Convenience wrapper that injects a WHERE condition into all queries.
 
 ```typescript
-import { injectWhere } from 'honey-ts';
+import { modify } from 'honey-ts';
 
-const secured = injectWhere(clause, ["=", "tenant_id", { $: tenantId }]);
+const secured = modify.addWhere(clause, ["=", "tenant_id", { $: tenantId }]);
 ```
 
 ---

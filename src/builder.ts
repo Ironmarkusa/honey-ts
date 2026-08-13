@@ -6,6 +6,7 @@
  */
 
 import type { SqlClause, SqlExpr } from "./types.js";
+import { addWhere as modifyAddWhere } from "./rewrites/modify.js";
 
 // ============================================================================
 // Schema Types
@@ -541,10 +542,9 @@ export function createQueryBuilder(schema: DatabaseSchema): QueryBuilder {
     },
 
     addWhere(clause: SqlClause, condition: SqlExpr): SqlClause {
-      if (!clause.where) {
-        return { ...clause, where: condition };
-      }
-      return { ...clause, where: ["and", clause.where, condition] };
+      // Delegates to the rewrites layer (root scope) so builder and modify
+      // share one behavior — including its structural dedup.
+      return modifyAddWhere(clause, condition, { scope: "root" });
     },
 
     removeWhere(clause: SqlClause, index: number): SqlClause {

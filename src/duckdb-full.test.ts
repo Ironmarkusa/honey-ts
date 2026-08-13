@@ -785,7 +785,7 @@ describe("tree walkers reach every nested clause", () => {
 
   for (const [name, dialect, sql] of cases) {
     test(`injectWhere reaches: ${name}`, async () => {
-      const { injectWhere } = await import("./helpers.js");
+      const { addWhere: injectWhere } = await import("./rewrites/modify.js");
       const clause = dialect ? fromSql(sql, { dialect }) : fromSql(sql);
       const out = format(injectWhere(clause, tenant as never), {
         dialect: dialect ?? "postgres",

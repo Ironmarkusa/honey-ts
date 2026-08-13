@@ -74,10 +74,10 @@ injectTenantFilter(clause, tenantId);
 
 ### Tenant Isolation
 
-Use `injectWhere()` to inject tenant filters:
+Use `modify.addWhere()` to inject tenant filters:
 
 ```typescript
-const secured = injectWhere(clause, ["=", "tenant_id", { $: tenantId }]);
+const secured = modify.addWhere(clause, ["=", "tenant_id", { $: tenantId }]);
 ```
 
 This recursively adds the filter to:
@@ -169,7 +169,7 @@ Clause maps are plain objects—memory usage is minimal.
 ### Do
 
 - Use for LLM-generated SQL that needs security transforms
-- Use `injectWhere()` for tenant isolation
+- Use `modify.addWhere()` for tenant isolation
 - Validate tables/columns before executing
 - Use parameterization (default behavior)
 - Add application-level authorization checks
@@ -213,7 +213,7 @@ honey-ts follows semantic versioning:
 - **Minor** (0.x.0): New features, non-breaking changes
 - **Major** (x.0.0): Breaking API changes
 
-The core API (`format`, `fromSql`, `injectWhere`) is stable. Builder helpers may evolve.
+The core API (`format`, `fromSql`, `modify.addWhere`) is stable. Builder helpers may evolve.
 
 ## Getting Help
 

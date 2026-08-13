@@ -2234,6 +2234,30 @@ export function literal(value: unknown): SqlExpr {
 }
 
 /**
+ * Create a parameterized value — the constructor form of `{$: value}`.
+ *
+ * ```ts
+ * { where: ["=", "status", $("active")] }   // status = ? (param: 'active')
+ * ```
+ */
+export function $(value: unknown): SqlExpr {
+  return { $: value };
+}
+
+/**
+ * Create a qualified identifier from parts, preserving dots inside names —
+ * the constructor form of `{ident: [...]}`.
+ *
+ * ```ts
+ * ident("db", "schema", "table")   // "db"."schema"."table"
+ * ident("weird.name")              // "weird.name" (one identifier, not two)
+ * ```
+ */
+export function ident(...parts: string[]): SqlExpr {
+  return { ident: parts };
+}
+
+/**
  * Create an equality map for WHERE clauses.
  */
 export function mapEquals(data: Record<string, unknown>): SqlExpr {

@@ -26,7 +26,7 @@ LLM generates SQL → Parse to clause map → Transform → Format back to SQL �
 The simplest approach—let the LLM generate standard SQL:
 
 ```typescript
-import { fromSql, format, injectWhere } from 'honey-ts';
+import { fromSql, format, modify } from 'honey-ts';
 
 // LLM generates SQL
 const llmSql = await llm.generate("Write SQL to get all orders for user 123");
@@ -36,7 +36,7 @@ const llmSql = await llm.generate("Write SQL to get all orders for user 123");
 const clause = fromSql(llmSql);
 
 // Inject tenant isolation
-const secured = injectWhere(clause, ["=", "tenant_id", { $: currentTenantId }]);
+const secured = modify.addWhere(clause, ["=", "tenant_id", { $: currentTenantId }]);
 
 // Format with parameterization
 const [sql, ...params] = format(secured);
@@ -84,7 +84,7 @@ const response = await llm.generate(systemPrompt + "\n\nQuery: Get active users"
 const clause = JSON.parse(response);
 
 // Transform and execute
-const secured = injectWhere(clause, ["=", "tenant_id", { $: currentTenantId }]);
+const secured = modify.addWhere(clause, ["=", "tenant_id", { $: currentTenantId }]);
 const [sql, ...params] = format(secured);
 ```
 
@@ -120,7 +120,7 @@ if (original !== roundTripped) {
 }
 
 // Continue with secured query
-const secured = injectWhere(clause, ["=", "tenant_id", { $: tenantId }]);
+const secured = modify.addWhere(clause, ["=", "tenant_id", { $: tenantId }]);
 ```
 
 ## Security Patterns
@@ -130,7 +130,7 @@ const secured = injectWhere(clause, ["=", "tenant_id", { $: tenantId }]);
 The killer feature—inject tenant filters into ALL subqueries:
 
 ```typescript
-import { injectWhere, fromSql, format } from 'honey-ts';
+import { modify, fromSql, format } from 'honey-ts';
 
 // LLM might generate complex queries with subqueries
 const llmSql = `
@@ -143,7 +143,7 @@ const llmSql = `
 
 // Parse and inject tenant filter everywhere
 const clause = fromSql(llmSql);
-const secured = injectWhere(clause, ["=", "tenant_id", { $: tenantId }]);
+const secured = modify.addWhere(clause, ["=", "tenant_id", { $: tenantId }]);
 
 const [sql] = format(secured, { inline: true });
 // Both orders AND users subquery now have tenant_id filter
@@ -154,12 +154,12 @@ const [sql] = format(secured, { inline: true });
 Restrict which tables can be queried:
 
 ```typescript
-import { walkClauses } from 'honey-ts';
+import { mapClauseTree } from 'honey-ts';
 
 const allowedTables = new Set(["users", "orders", "products"]);
 
 function validateTables(clause: SqlClause): void {
-  walkClauses(clause, (c) => {
+  mapClauseTree(clause, (c) => {
     if (c.from) {
       const tables = Array.isArray(c.from) ? c.from : [c.from];
       for (const t of tables) {
@@ -185,7 +185,7 @@ Prevent access to sensitive columns:
 const blockedColumns = new Set(["password_hash", "ssn", "credit_card"]);
 
 function validateColumns(clause: SqlClause): void {
-  walkClauses(clause, (c) => {
+  mapClauseTree(clause, (c) => {
     if (c.select && Array.isArray(c.select)) {
       for (const col of c.select) {
         if (typeof col === "string" && blockedColumns.has(col)) {
@@ -258,7 +258,7 @@ async function executeLlmQuery(llmSql: string, tenantId: string) {
     validateSelectOnly(clause);
 
     // Secure
-    const secured = injectWhere(clause, ["=", "tenant_id", { $: tenantId }]);
+    const secured = modify.addWhere(clause, ["=", "tenant_id", { $: tenantId }]);
 
     // Execute
     const [sql, ...params] = format(secured);
@@ -284,17 +284,17 @@ Property-based testing for security:
 
 ```typescript
 import fc from 'fast-check';
-import { injectWhere, walkClauses, format } from 'honey-ts';
+import { modify, mapClauseTree, format } from 'honey-ts';
 
 // Test that tenant filter is always present
 it("tenant filter injected into all subqueries", () => {
   fc.assert(fc.property(
     arbitraryClause,
     (clause) => {
-      const secured = injectWhere(clause, ["=", "tenant_id", { $: "test" }]);
+      const secured = modify.addWhere(clause, ["=", "tenant_id", { $: "test" }]);
 
       // Verify every clause with FROM has the tenant filter
-      walkClauses(secured, (c) => {
+      mapClauseTree(secured, (c) => {
         if (c.from && c.where) {
           const sql = format(c, { inline: true })[0];
           expect(sql).toContain("tenant_id");
@@ -309,7 +309,7 @@ it("tenant filter injected into all subqueries", () => {
 ## Real-World Example
 
 ```typescript
-import { fromSql, format, injectWhere, walkClauses } from 'honey-ts';
+import { fromSql, format, modify, mapClauseTree } from 'honey-ts';
 
 class SecureSqlExecutor {
   constructor(
@@ -336,11 +336,11 @@ class SecureSqlExecutor {
     this.validateSelectOnly(clause);
 
     // Inject tenant isolation
-    let secured = injectWhere(clause, ["=", "tenant_id", { $: tenantId }]);
+    let secured = modify.addWhere(clause, ["=", "tenant_id", { $: tenantId }]);
 
     // Optionally inject user filter for user-scoped data
     if (this.requiresUserScope(clause)) {
-      secured = injectWhere(secured, ["=", "user_id", { $: userId }]);
+      secured = modify.addWhere(secured, ["=", "user_id", { $: userId }]);
     }
 
     // Format and execute
@@ -359,7 +359,7 @@ class SecureSqlExecutor {
 
 1. **Parse LLM SQL** with `fromSql()`
 2. **Validate** tables, columns, statement types
-3. **Transform** with `injectWhere()` or `walkClauses()`
+3. **Transform** with `modify.addWhere()` or `mapClauseTree()`
 4. **Format** with `format()` for parameterized SQL
 5. **Execute** safely
 

@@ -6,7 +6,8 @@
  */
 
 import type { SqlClause, SqlExpr } from "./types.js";
-import { walkClauses } from "./helpers.js";
+import { walkClauseTree } from "./rewrites/walk.js";
+import { JOIN_KEYS } from "./traversal.js";
 
 export type SqlOperation = "select" | "insert" | "update" | "delete";
 
@@ -129,7 +130,7 @@ export function getOperation(clause: SqlClause): SqlOperation | null {
 export function collectTables(clause: SqlClause): string[] {
   const tables: string[] = [];
 
-  walkClauses(clause, (c) => {
+  walkClauseTree(clause, (c) => {
     // FROM clause
     if (c.from) {
       extractTableNames(c.from, tables);
@@ -140,8 +141,10 @@ export function collectTables(clause: SqlClause): string[] {
     if (typeof c.update === "string") tables.push(c.update);
     if (typeof c["delete-from"] === "string") tables.push(c["delete-from"]);
 
-    // JOINs
-    for (const joinType of ["join", "left-join", "right-join", "inner-join", "full-join", "cross-join"]) {
+    // JOINs — the shared traversal spec includes the DuckDB variants
+    // (ASOF/SEMI/ANTI/POSITIONAL); a hand-rolled list here would let a table
+    // slip past allowedTables through a variant join.
+    for (const joinType of [...JOIN_KEYS, "cross-join"]) {
       const joins = c[joinType] as [SqlExpr, SqlExpr][] | undefined;
       if (joins) {
         for (const [tableExpr] of joins) {
@@ -157,7 +160,6 @@ export function collectTables(clause: SqlClause): string[] {
       }
     }
 
-    return c; // Return unchanged for walk
   });
 
   return [...new Set(tables)];
