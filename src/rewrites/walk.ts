@@ -11,6 +11,14 @@
 
 import type { SqlClause, SqlExpr } from "../types.js";
 import { isClause } from "../types.js";
+import {
+  CTE_KEYS,
+  SET_OP_KEYS,
+  EXPR_KEYS,
+  JOIN_KEYS,
+  NESTED_CLAUSE_KEYS,
+  SOURCE_SPEC_KEYS,
+} from "../traversal.js";
 
 // ============================================================================
 // Clause tree walking
@@ -30,7 +38,7 @@ export function walkClauseTree(
 ): void {
   visitor(clause, scope);
 
-  for (const key of ["with", "with-recursive"] as const) {
+  for (const key of CTE_KEYS) {
     const ctes = clause[key] as [string, SqlClause][] | undefined;
     if (ctes) {
       for (const [name, cte] of ctes) {
@@ -40,7 +48,7 @@ export function walkClauseTree(
     }
   }
 
-  for (const key of ["union", "union-all", "intersect", "except", "except-all"] as const) {
+  for (const key of SET_OP_KEYS) {
     const branches = clause[key] as SqlClause[] | undefined;
     if (branches) {
       branches.forEach((b, i) =>
@@ -49,9 +57,35 @@ export function walkClauseTree(
     }
   }
 
-  for (const key of ["from", "where", "having", "select"] as const) {
+  for (const key of EXPR_KEYS) {
     if (clause[key] !== undefined) {
       walkExprForClauses(clause[key] as SqlExpr, visitor, `${scope}.${key}`);
+    }
+  }
+
+  // Joined tables may be subqueries; ON conditions may contain subqueries.
+  for (const key of JOIN_KEYS) {
+    const pairs = clause[key] as [SqlExpr, SqlExpr][] | undefined;
+    if (pairs) {
+      pairs.forEach(([table, cond], i) => {
+        walkExprForClauses(table, visitor, `${scope}.${key}[${i}]`);
+        if (cond !== null && cond !== undefined) {
+          walkExprForClauses(cond, visitor, `${scope}.${key}[${i}].on`);
+        }
+      });
+    }
+  }
+
+  for (const key of NESTED_CLAUSE_KEYS) {
+    if (isClause(clause[key])) {
+      walkClauseTree(clause[key] as SqlClause, visitor, `${scope}.${key}`);
+    }
+  }
+
+  for (const key of SOURCE_SPEC_KEYS) {
+    const spec = clause[key] as { source?: unknown } | undefined;
+    if (spec && isClause(spec.source)) {
+      walkClauseTree(spec.source as SqlClause, visitor, `${scope}.${key}.source`);
     }
   }
 }
@@ -82,7 +116,7 @@ export function mapClauseTree(
 ): SqlClause {
   let next: SqlClause = { ...clause };
 
-  for (const key of ["with", "with-recursive"] as const) {
+  for (const key of CTE_KEYS) {
     if (next[key] !== undefined) {
       const ctes = next[key] as [string, SqlClause][];
       next[key] = ctes.map(([name, cte]) => {
@@ -92,7 +126,7 @@ export function mapClauseTree(
     }
   }
 
-  for (const key of ["union", "union-all", "intersect", "except", "except-all"] as const) {
+  for (const key of SET_OP_KEYS) {
     if (next[key] !== undefined) {
       const branches = next[key] as SqlClause[];
       next[key] = branches.map((b, i) =>
@@ -101,13 +135,48 @@ export function mapClauseTree(
     }
   }
 
-  for (const key of ["from", "where", "having", "select"] as const) {
+  for (const key of EXPR_KEYS) {
     if (next[key] !== undefined) {
-      next[key] = mapExprForClauses(
+      // Writing through the union of all EXPR_KEYS value types overflows the
+      // checker (TS2590); the record cast sidesteps it.
+      (next as Record<string, unknown>)[key] = mapExprForClauses(
         next[key] as SqlExpr,
         transform,
         `${scope}.${key}`
+      );
+    }
+  }
+
+  // Joined tables may be subqueries; ON conditions may contain subqueries.
+  for (const key of JOIN_KEYS) {
+    if (next[key] !== undefined) {
+      const pairs = next[key] as [SqlExpr, SqlExpr][];
+      next[key] = pairs.map(([table, cond], i) => [
+        mapExprForClauses(table, transform, `${scope}.${key}[${i}]`),
+        cond === null || cond === undefined
+          ? cond
+          : mapExprForClauses(cond, transform, `${scope}.${key}[${i}].on`),
+      ]) as never;
+    }
+  }
+
+  for (const key of NESTED_CLAUSE_KEYS) {
+    if (isClause(next[key])) {
+      next[key] = mapClauseTree(
+        next[key] as SqlClause,
+        transform,
+        `${scope}.${key}`
       ) as never;
+    }
+  }
+
+  for (const key of SOURCE_SPEC_KEYS) {
+    const spec = next[key] as { source?: unknown } | undefined;
+    if (spec && isClause(spec.source)) {
+      next[key] = {
+        ...spec,
+        source: mapClauseTree(spec.source as SqlClause, transform, `${scope}.${key}.source`),
+      } as never;
     }
   }
 

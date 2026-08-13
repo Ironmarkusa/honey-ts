@@ -5,6 +5,13 @@
  */
 
 import type { SqlClause, SqlExpr } from "./types.js";
+import {
+  SET_OP_KEYS,
+  EXPR_KEYS,
+  JOIN_KEYS,
+  NESTED_CLAUSE_KEYS,
+  SOURCE_SPEC_KEYS,
+} from "./traversal.js";
 
 // ============================================================================
 // Identifier Utilities
@@ -423,7 +430,7 @@ export function walkClauses(
   }
 
   // UNION / INTERSECT / EXCEPT - array of clauses
-  for (const key of ["union", "union-all", "intersect", "except", "except-all"] as const) {
+  for (const key of SET_OP_KEYS) {
     if (processed[key]) {
       processed[key] = (processed[key] as SqlClause[]).map(
         (c) => walkClauses(c, transform)
@@ -431,24 +438,51 @@ export function walkClauses(
     }
   }
 
-  // FROM - may contain subqueries
-  if (processed.from) {
-    processed.from = walkExprForClauses(processed.from as SqlExpr, transform);
+  // Expression-bearing clauses — any of these may contain subqueries
+  // (derived tables, IN/EXISTS, scalar subqueries, INSERT sources, ...).
+  for (const key of EXPR_KEYS) {
+    if (processed[key] !== undefined) {
+      // Writing through the union of all EXPR_KEYS value types overflows the
+      // checker (TS2590); the record cast sidesteps it.
+      (processed as Record<string, unknown>)[key] = walkExprForClauses(
+        processed[key] as SqlExpr,
+        transform
+      );
+    }
   }
 
-  // WHERE - may contain subqueries (IN, EXISTS, scalar)
-  if (processed.where) {
-    processed.where = walkExprForClauses(processed.where as SqlExpr, transform);
+  // JOIN pairs — the joined table may be a subquery, and the ON condition
+  // may contain subqueries. Previously untraversed, which meant injectWhere
+  // never reached `JOIN (SELECT ...) s ON ...`.
+  for (const key of JOIN_KEYS) {
+    if (processed[key] !== undefined) {
+      processed[key] = (processed[key] as [SqlExpr, SqlExpr][]).map(
+        ([table, cond]) => [
+          walkExprForClauses(table, transform),
+          cond === null || cond === undefined
+            ? cond
+            : walkExprForClauses(cond, transform),
+        ]
+      );
+    }
   }
 
-  // SELECT - may contain scalar subqueries
-  if (processed.select) {
-    processed.select = walkExprForClauses(processed.select as SqlExpr, transform);
+  // Statement targets that are whole clauses (DESCRIBE SELECT ..., etc).
+  for (const key of NESTED_CLAUSE_KEYS) {
+    if (isClauseMap(processed[key])) {
+      processed[key] = walkClauses(processed[key] as SqlClause, transform);
+    }
   }
 
-  // HAVING - may contain subqueries
-  if (processed.having) {
-    processed.having = walkExprForClauses(processed.having as SqlExpr, transform);
+  // PIVOT/UNPIVOT specs with a subquery source.
+  for (const key of SOURCE_SPEC_KEYS) {
+    const spec = processed[key] as { source?: unknown } | undefined;
+    if (spec && isClauseMap(spec.source)) {
+      processed[key] = {
+        ...spec,
+        source: walkClauses(spec.source as SqlClause, transform),
+      };
+    }
   }
 
   // Apply transform to this clause

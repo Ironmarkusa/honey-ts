@@ -762,3 +762,48 @@ describe("multi-part names and literal edge cases", () => {
     await roundTrips("SELECT c FROM t GROUP BY GROUPING SETS (cube (crs)), (), tp");
   });
 });
+
+// ===========================================================================
+describe("tree walkers reach every nested clause", () => {
+  // Regression for a tenant-isolation hole: joined subqueries lived under
+  // join keys that neither walker traversed, so injectWhere/addWhere never
+  // filtered them — including plain LEFT JOIN subqueries on postgres.
+  const tenant = ["=", "tenant_id", { $: "t1" }] as const;
+
+  const cases: Array<[string, "duckdb" | undefined, string]> = [
+    ["LEFT JOIN subquery (pg)", undefined,
+      "SELECT * FROM orders LEFT JOIN (SELECT user_id FROM sessions) s ON orders.user_id = s.user_id"],
+    ["SEMI JOIN subquery", "duckdb",
+      "SELECT * FROM orders SEMI JOIN (SELECT user_id FROM sessions) s ON orders.user_id = s.user_id"],
+    ["ON-condition subquery", undefined,
+      "SELECT * FROM a JOIN b ON a.id IN (SELECT id FROM allow)"],
+    ["QUALIFY subquery", "duckdb",
+      "SELECT * FROM t QUALIFY row_number() OVER () IN (SELECT n FROM keep)"],
+    ["PIVOT subquery source", "duckdb",
+      "SELECT * FROM (PIVOT (SELECT * FROM sales) ON region USING sum(amt))"],
+  ];
+
+  for (const [name, dialect, sql] of cases) {
+    test(`injectWhere reaches: ${name}`, async () => {
+      const { injectWhere } = await import("./helpers.js");
+      const clause = dialect ? fromSql(sql, { dialect }) : fromSql(sql);
+      const out = format(injectWhere(clause, tenant as never), {
+        dialect: dialect ?? "postgres",
+        inline: true,
+      })[0];
+      const filters = (out.match(/tenant_id/g) ?? []).length;
+      assert.ok(filters >= 2, `expected filter in nested clause too:\n  ${out}`);
+    });
+
+    test(`rewrites addWhere reaches: ${name}`, async () => {
+      const { addWhere } = await import("./rewrites/modify.js");
+      const clause = dialect ? fromSql(sql, { dialect }) : fromSql(sql);
+      const out = format(addWhere(clause, tenant as never), {
+        dialect: dialect ?? "postgres",
+        inline: true,
+      })[0];
+      const filters = (out.match(/tenant_id/g) ?? []).length;
+      assert.ok(filters >= 2, `expected filter in nested clause too:\n  ${out}`);
+    });
+  }
+});

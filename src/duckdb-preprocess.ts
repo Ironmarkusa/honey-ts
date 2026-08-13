@@ -69,6 +69,16 @@ export const SENTINEL = {
   stmt: "__honey_stmt",
 } as const;
 
+/**
+ * Safety valve for the repeat-until-stable rewrite loops. Every loop
+ * terminates on its own when a pass makes no change; the cap only guards
+ * against a rewrite that oscillates. It must comfortably exceed the number of
+ * occurrences of any one construct in a real statement — the old per-loop
+ * caps of 10–40 silently stopped rewriting wide statements (e.g. a SELECT
+ * with 200 list literals kept only the first 10).
+ */
+const MAX_REWRITE_PASSES = 10_000;
+
 /** Escape a string for embedding as a single-quoted SQL literal. */
 function q(text: string): string {
   return `'${text.replace(/'/g, "''")}'`;
@@ -333,7 +343,7 @@ const EXPRESSION_POSITION_KEYWORDS = new Set([
 function rewriteListLiterals(sql: string): string {
   let out = sql;
   // Repeat until stable so nested literals are all rewritten.
-  for (let pass = 0; pass < 10; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     let changed = false;
 
@@ -376,7 +386,7 @@ function rewriteListLiterals(sql: string): string {
  */
 function rewriteStructLiterals(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 10; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     let changed = false;
 
@@ -500,7 +510,7 @@ function rewriteMaterialized(sql: string): string {
  */
 function rewriteCteColumnAliases(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const re = /\b(WITH\s+(?:RECURSIVE\s+)?|,\s*)([A-Za-z_][\w]*|"[^"]+")\s*\(([^()]+)\)\s+AS\s*\(/gi;
     let m: RegExpExecArray | null;
@@ -543,7 +553,7 @@ function rewriteCteColumnAliases(sql: string): string {
  */
 function rewriteLambdaKeyword(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 30; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const re = /\blambda\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:/gi;
     const m = re.exec(out);
@@ -581,7 +591,7 @@ function rewriteLambdaKeyword(sql: string): string {
  */
 function rewriteWindowClause(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 10; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\bWINDOW\s+([A-Za-z_]\w*|"[^"]+")\s+AS\s*\(/gi.exec(out);
     if (!m || guard(m.index)) break;
@@ -632,7 +642,7 @@ function rewriteWindowClause(sql: string): string {
  */
 function rewriteFrames(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 30; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const over = /\bOVER\s*\(/gi;
     let m: RegExpExecArray | null;
@@ -685,7 +695,7 @@ function rewriteFrames(sql: string): string {
  */
 function rewriteSlices(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     let changed = false;
 
@@ -792,7 +802,7 @@ function rewriteNamedArgs(sql: string): string {
  */
 function rewriteExportState(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 30; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\bEXPORT_STATE\b/i.exec(out);
     if (!m || guard(m.index)) break;
@@ -816,7 +826,7 @@ function rewriteExportState(sql: string): string {
  */
 function rewriteMapLiteral(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\bMAP\s*\{/gi.exec(out);
     if (!m || guard(m.index)) break;
@@ -868,7 +878,7 @@ function splitStructEntries(inner: string): string[] | null {
  */
 function rewriteComplexCastTypes(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 40; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     let changed = false;
 
@@ -933,7 +943,7 @@ function rewriteComplexCastTypes(sql: string): string {
  */
 function rewriteFieldAccess(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 40; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     // `).x` and `].x` — parenthesized-expression fields and subscript fields
     // (`l[1].x`) both need the rewrite; bare `ident.x` is ordinary
@@ -1005,7 +1015,7 @@ function rewriteIntervalUnit(sql: string): string {
   );
 
   // Expression operand: INTERVAL (expr) UNIT.
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const g = makeGuard(out);
     const m = /\bINTERVAL\s*\(/gi.exec(out);
     if (!m || g(m.index)) break;
@@ -1040,7 +1050,7 @@ function rewriteMultiPartNames(sql: string): string {
   // Table position: FROM / JOIN / INTO / UPDATE followed by a 3+-part chain
   // of BARE identifiers (quoted parts may contain dots; folding those would
   // corrupt the name, so they are left alone).
-  for (let pass = 0; pass < 30; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const re = /\b(FROM|JOIN|INTO|UPDATE)\s+([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*){2,})(?![\w.("])/gi;
     let m: RegExpExecArray | null;
@@ -1061,7 +1071,7 @@ function rewriteMultiPartNames(sql: string): string {
 
   // Expression position: 4+-part chains anywhere (column paths through
   // db.schema.table.col[.field...]).
-  for (let pass = 0; pass < 30; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const re = new RegExp(
       String.raw`(^|[^\w".])(${IDENT_SEGMENT}(?:\s*\.\s*${IDENT_SEGMENT}){3,})(?![\w."(])`,
@@ -1099,7 +1109,7 @@ function rewriteMultiPartNames(sql: string): string {
  */
 function rewriteIsDistinct(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 30; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\bIS\s+(NOT\s+)?DISTINCT\s+FROM\b/gi.exec(out);
     if (!m || guard(m.index)) break;
@@ -1142,7 +1152,7 @@ function rewriteIsDistinct(sql: string): string {
  */
 function rewriteListComprehensions(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     let changed = false;
 
@@ -1214,7 +1224,7 @@ function rewriteListComprehensions(sql: string): string {
  */
 function rewriteBareFromValues(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 10; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\b(FROM|JOIN)\s+(VALUES\s*\()/gi.exec(out);
     if (!m || guard(m.index)) break;
@@ -1245,7 +1255,7 @@ function rewriteBareFromValues(sql: string): string {
  */
 function rewriteExceptIntersect(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     let changed = false;
     let depth = 0;
@@ -1288,7 +1298,7 @@ function rewriteExceptIntersect(sql: string): string {
  */
 function rewriteParenSetOps(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 10; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     let changed = false;
 
@@ -1324,7 +1334,7 @@ function rewriteParenSetOps(sql: string): string {
  */
 function rewriteCollate(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 30; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\bCOLLATE\s+([A-Za-z_][\w.]*|"[^"]+")/gi.exec(out);
     if (!m || guard(m.index)) break;
@@ -1346,7 +1356,7 @@ function rewriteCollate(sql: string): string {
  */
 function rewriteNullsModifier(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\s+(IGNORE|RESPECT)\s+NULLS\s*\)/gi.exec(out);
     if (!m || guard(m.index)) break;
@@ -1373,7 +1383,7 @@ function rewriteNullsModifier(sql: string): string {
 function rewriteUnaliasedSubqueries(sql: string): string {
   let out = sql;
   let counter = 0;
-  for (let pass = 0; pass < 50; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const re = /(\bFROM\s*|\bJOIN\s*|,\s*)\(/gi;
     let m: RegExpExecArray | null;
@@ -1447,7 +1457,7 @@ const LAMBDA_PARAM =
  */
 function rewriteArrowLambdas(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 40; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const callRe = /\b([A-Za-z_]\w*)\s*\(/g;
     let m: RegExpExecArray | null;
@@ -1492,7 +1502,7 @@ function rewriteArrowLambdas(sql: string): string {
  */
 function rewriteStarModifiers(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const re = /((?:[A-Za-z_]\w*|"[^"]+")\s*\.\s*)?\*\s+(EXCLUDE|REPLACE)\b/gi;
     let m: RegExpExecArray | null;
@@ -1572,7 +1582,7 @@ function rewriteStarModifiers(sql: string): string {
 /** `TRY_CAST(x AS T)` -> `__honey_try(CAST(x AS T))`. */
 function rewriteTryCast(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const match = /\bTRY_CAST\s*\(/i.exec(out);
     if (!match || guard(match.index)) break;
@@ -1597,7 +1607,7 @@ function rewriteTryCast(sql: string): string {
  */
 function rewriteGroupingSets(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 10; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\bGROUPING\s+SETS\s*\(/gi.exec(out);
     if (!m || guard(m.index)) break;
@@ -1638,7 +1648,7 @@ function rewriteGroupingSets(sql: string): string {
  */
 function rewriteJoins(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 30; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\b(ASOF|SEMI|ANTI|POSITIONAL)\s+(LEFT\s+|RIGHT\s+|FULL\s+|INNER\s+)?(OUTER\s+)?JOIN\b/gi.exec(out);
     if (!m || guard(m.index)) break;
@@ -1812,7 +1822,7 @@ function rewriteInsertModifiers(sql: string): string {
  */
 function rewriteUsingSample(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\bUSING\s+SAMPLE\s+/gi.exec(out);
     if (!m || guard(m.index)) break;
@@ -1857,7 +1867,7 @@ function rewriteUsingSample(sql: string): string {
  */
 function rewriteQualify(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\bQUALIFY\b/gi.exec(out);
     if (!m || guard(m.index)) break;
@@ -1910,7 +1920,7 @@ function rewriteQualify(sql: string): string {
  */
 function rewriteBareHaving(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const re = /\bHAVING\b/gi;
     let m: RegExpExecArray | null;
@@ -1957,7 +1967,7 @@ function rewriteBareHaving(sql: string): string {
  */
 function rewriteFilterWhere(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 30; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const re = /\bFILTER\s*\(\s*/gi;
     let m: RegExpExecArray | null;
@@ -1983,7 +1993,7 @@ function rewriteFilterWhere(sql: string): string {
  */
 function rewriteEmptyGroupItems(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     // No \b before the alternation: `cube (crs), ()` puts the comma right
     // after `)`, and there is no word boundary between two punctuators.
@@ -2084,7 +2094,7 @@ function rewriteIdiv(sql: string): string {
 function rewriteEmbeddedStatements(sql: string): string {
   let out = sql;
   // (PIVOT ...) / (UNPIVOT ...) / (DESCRIBE ...) / (SUMMARIZE ...)
-  for (let pass = 0; pass < 10; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const m = /\(\s*(PIVOT|UNPIVOT|DESCRIBE|SUMMARIZE)\b/gi.exec(out);
     if (!m || guard(m.index)) break;
@@ -2102,7 +2112,7 @@ function rewriteEmbeddedStatements(sql: string): string {
   // Postfix pivot: `FROM <table-or-(subquery)> PIVOT( ... )`. The raw text is
   // preserved in its original source form (`t PIVOT(...)`), which the pivot
   // mini-parser recognises by shape.
-  for (let pass = 0; pass < 10; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     const re = /\b(UN)?PIVOT\s*\(/gi;
     let m: RegExpExecArray | null;
@@ -2226,7 +2236,7 @@ function rewriteFromFirst(sql: string): string {
  */
 function rewriteAggOrderBy(sql: string): string {
   let out = sql;
-  for (let pass = 0; pass < 20; pass++) {
+  for (let pass = 0; pass < MAX_REWRITE_PASSES; pass++) {
     const guard = makeGuard(out);
     let changed = false;
 
