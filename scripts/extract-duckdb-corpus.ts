@@ -69,9 +69,22 @@ function main() {
         buffer.push(line);
       }
 
-      const sql = buffer.join("\n").trim().replace(/;\s*$/, "").replace(/\s+/g, " ");
-      // Skip templated statements and paths that only mean something in-harness.
+      const sql = buffer
+        .join("\n")
+        .trim()
+        // sqllogictest allows trailing `# ...` comments on a statement line.
+        // They are harness syntax, not SQL, so strip them before anything else.
+        .replace(/\s+#\s.*$/gm, "")
+        .replace(/;\s*$/, "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      // Skip harness templates and paths that only mean something in-harness.
+      // `{type}`-style placeholders are substituted by the test runner at load
+      // time, so the raw text is not valid SQL in any dialect and would only
+      // pollute the parse-rate measurement.
       if (!sql || sql.includes("${") || sql.includes("__TEST_DIR__")) continue;
+      if (/\{[a-z_]+\}/i.test(sql)) continue;
       if (sql.length > MAX_LENGTH || seen.has(sql)) continue;
       seen.add(sql);
 

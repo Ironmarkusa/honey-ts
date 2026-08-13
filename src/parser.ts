@@ -42,6 +42,17 @@ import {
   type QName,
   type Name,
 } from "pgsql-ast-parser";
+import { preprocessDuckDb, reviveSentinels } from "./duckdb-preprocess.js";
+
+/** Options for fromSql. */
+export interface FromSqlOptions {
+  /**
+   * Source dialect. `duckdb` enables a rewriting pass that lets DuckDB-only
+   * syntax (list/struct literals, GROUP BY ALL, TRY_CAST, FROM-first, ...)
+   * through the PostgreSQL parser. Defaults to postgres behaviour.
+   */
+  dialect?: "postgres" | "duckdb";
+}
 
 import type { SqlClause, SqlExpr } from "./types.js";
 
@@ -350,8 +361,14 @@ function fromToClause(froms: From[] | undefined): SqlExpr[] | undefined {
 
     if (f.type === "statement") {
       const stmt = f as FromStatement;
-      const stmtAny = stmt as unknown as { lateral?: boolean };
-      let subquery: SqlExpr = selectToClause(stmt.statement as SelectFromStatement);
+      const stmtAny = stmt as unknown as {
+        lateral?: boolean;
+        columnNames?: Array<{ name: string }>;
+      };
+      // Dispatch through statementToClause, not selectToClause: a derived table
+      // can be a VALUES list rather than a SELECT, and forcing it through the
+      // SELECT path silently produced an empty clause (emitting "FROM ()").
+      let subquery: SqlExpr = statementToClause(stmt.statement as Statement);
 
       // Handle LATERAL subqueries
       if (stmtAny.lateral) {
@@ -359,6 +376,11 @@ function fromToClause(froms: From[] | undefined): SqlExpr[] | undefined {
       }
 
       if (stmt.alias) {
+        // Column alias list: FROM (VALUES (1,2)) t(a, b)
+        const columnNames = stmtAny.columnNames?.map((c) => c.name);
+        if (columnNames?.length) {
+          return [subquery, [stmt.alias, ...columnNames]];
+        }
         return [subquery, stmt.alias];
       }
 
@@ -650,6 +672,13 @@ function statementToClause(stmt: Statement): SqlClause {
       return deleteToClause(stmt as DeleteStatement);
     case "with":
       return withToClause(stmt as WithStatement);
+    case "values":
+      // Standalone VALUES list, e.g. a derived table `FROM (VALUES (1,2)) t`.
+      return {
+        values: (stmt as unknown as { values: Expr[][] }).values.map((row) =>
+          row.map(exprToClause)
+        ),
+      };
     default:
       // For unsupported statements, return raw SQL
       return { raw: astToSql.statement(stmt) };
@@ -703,7 +732,11 @@ function withToClause(stmt: WithStatement): SqlClause {
  * // => { select: [":id", ":name"], from: ":users", where: ["=", ":active", true] }
  * ```
  */
-export function fromSql(sql: string): SqlClause {
+export function fromSql(sql: string, options: FromSqlOptions = {}): SqlClause {
+  if (options.dialect === "duckdb") {
+    const stmt = parseFirst(preprocessDuckDb(sql));
+    return reviveSentinels(statementToClause(stmt)) as SqlClause;
+  }
   const stmt = parseFirst(sql);
   return statementToClause(stmt);
 }

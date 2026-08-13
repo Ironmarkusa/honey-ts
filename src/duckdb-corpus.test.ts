@@ -47,10 +47,12 @@ interface Fixture {
  * regress later.
  */
 const BASELINE = {
-  /** Statements the pgsql-ast-parser front end can parse. Actual: 16561/26403. */
-  parsed: 16561,
-  /** Round-tripped statements DuckDB's parser still accepts. Actual: 15826. */
-  accepted: 15826,
+  /** Statements the plain PostgreSQL front end parses. Actual: 16318/23670. */
+  parsedPostgres: 16318,
+  /** Statements the DuckDB front end parses (preprocessor on). Actual: 19118. */
+  parsed: 19118,
+  /** Round-tripped statements DuckDB's parser still accepts. Actual: 18813. */
+  accepted: 18813,
 };
 
 /** Errors that mean "this front end does not support that syntax", not "bug". */
@@ -59,6 +61,8 @@ const EXPECTED_PARSE_FAILURE =
 
 interface Outcome {
   total: number;
+  /** Parsed by the plain PostgreSQL front end, for comparison. */
+  parsedPostgres: number;
   parsed: number;
   parseFailures: number;
   emitCrashes: Array<{ sql: string; error: string }>;
@@ -74,6 +78,7 @@ before(async () => {
 
   const result: Outcome = {
     total: fixture.statements.length,
+    parsedPostgres: 0,
     parsed: 0,
     parseFailures: 0,
     emitCrashes: [],
@@ -84,9 +89,18 @@ before(async () => {
   const emitted: Array<{ sql: string; emitted: string }> = [];
 
   for (const { sql } of fixture.statements) {
+    // Measure the plain PostgreSQL front end too, so the value the DuckDB
+    // preprocessor adds stays visible rather than being folded into one number.
+    try {
+      fromSql(sql);
+      result.parsedPostgres++;
+    } catch {
+      /* expected for DuckDB-only syntax */
+    }
+
     let clause: SqlClause;
     try {
-      clause = fromSql(sql);
+      clause = fromSql(sql, { dialect: "duckdb" });
       result.parsed++;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -148,6 +162,18 @@ describe("DuckDB corpus round-trip", () => {
     );
   });
 
+  test("the DuckDB front end parses strictly more than the postgres one", () => {
+    assert.ok(
+      outcome.parsedPostgres >= BASELINE.parsedPostgres,
+      `postgres front end regressed: ${outcome.parsedPostgres} < ${BASELINE.parsedPostgres}`
+    );
+    // The preprocessor is additive; it must never cost us a statement.
+    assert.ok(
+      outcome.parsed > outcome.parsedPostgres,
+      `duckdb front end (${outcome.parsed}) should beat postgres (${outcome.parsedPostgres})`
+    );
+  });
+
   test(`at least ${BASELINE.accepted} round-trips are accepted by DuckDB`, () => {
     assert.ok(
       outcome.accepted >= BASELINE.accepted,
@@ -156,9 +182,9 @@ describe("DuckDB corpus round-trip", () => {
     );
   });
 
-  test("acceptance rate of parsed statements stays above 95%", () => {
+  test("acceptance rate of parsed statements stays above 98%", () => {
     const rate = (100 * outcome.accepted) / outcome.parsed;
-    assert.ok(rate >= 95, `acceptance rate ${rate.toFixed(2)}%`);
+    assert.ok(rate >= 98, `acceptance rate ${rate.toFixed(2)}%`);
   });
 
   test("corpus summary", () => {
@@ -168,7 +194,9 @@ describe("DuckDB corpus round-trip", () => {
       [
         "",
         `  corpus statements : ${outcome.total}`,
-        `  parsed            : ${outcome.parsed} (${pct(outcome.parsed, outcome.total)})`,
+        `  parsed (postgres) : ${outcome.parsedPostgres} (${pct(outcome.parsedPostgres, outcome.total)})`,
+        `  parsed (duckdb)   : ${outcome.parsed} (${pct(outcome.parsed, outcome.total)})`,
+        `  preprocessor gain : +${outcome.parsed - outcome.parsedPostgres}`,
         `  parse failures    : ${outcome.parseFailures} (DuckDB-only syntax)`,
         `  emitter crashes   : ${outcome.emitCrashes.length}`,
         `  DuckDB accepted   : ${outcome.accepted} (${pct(outcome.accepted, outcome.parsed)} of parsed)`,

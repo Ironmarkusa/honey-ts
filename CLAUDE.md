@@ -357,12 +357,47 @@ devDependency) and review the diff:
 npm run gen:duckdb-ops
 ```
 
+### Parsing DuckDB SQL
+
+`fromSql` parses with a PostgreSQL parser by default. Pass the dialect to enable
+a rewriting front end that handles DuckDB-only syntax:
+
+```typescript
+import { fromSql } from 'honey-ts';
+
+fromSql("SELECT [1, 2], {'a': 1} FROM t GROUP BY ALL", { dialect: 'duckdb' });
+```
+
+It rewrites DuckDB constructs into PostgreSQL-parseable text using reserved
+sentinel calls, then converts them back to native honey constructs after
+parsing, so the clause map round-trips to real DuckDB syntax. Handled:
+
+| construct | example |
+|---|---|
+| list literals | `[1, 2, 3]`, nested |
+| struct literals | `{'a': 1, 'b': 'x'}` |
+| list slicing | `a[1:2]`, `a[2:]`, `a[:3]` |
+| `TRY_CAST` | `TRY_CAST(a AS INT)` |
+| aggregate `ORDER BY` | `list(v ORDER BY v DESC)` |
+| `GROUP BY` / `ORDER BY ALL` | `GROUP BY ALL` |
+| FROM-first | `FROM t SELECT a` |
+| named arguments | `f(bin_count => 10)`, `f(x := 1)` |
+| `==` | normalised to `=` |
+
+Rewrites are string-, identifier- and comment-aware, so brackets inside
+`'literals'`, `"identifiers"`, `$$blocks$$` and comments are never touched.
+Without `{dialect: 'duckdb'}` parsing is byte-for-byte unchanged.
+
+On DuckDB's own 23,670-statement test corpus: the PostgreSQL front end parses
+68.9%, the DuckDB front end **80.8%**, and **98.4%** of what parses round-trips
+back to SQL DuckDB accepts.
+
 ### Known limitations
 
-- The `fromSql` front end is a PostgreSQL parser, so DuckDB-only *input* syntax
-  (`EXCLUDE`, `QUALIFY`, list/struct literals, lambdas) does not parse. It
-  parses ~63% of DuckDB's own test corpus; of what parses, 95.6% round-trips
-  back to SQL DuckDB accepts.
+- Not yet parsed: `EXCLUDE`/`REPLACE` star modifiers, `QUALIFY`, lambdas,
+  `PIVOT`, `ASOF`/`POSITIONAL` joins, `COLUMNS()`, `USING SAMPLE`. These can all
+  still be *built* as clause maps and emitted — only reading them back from SQL
+  is unsupported.
 - Data-modifying CTEs (`WITH d AS (DELETE ... RETURNING ...) SELECT`) parse and
   emit, but DuckDB rejects them — they are PostgreSQL-only.
 - `E'...'` escape-string literals fail upstream in `pgsql-ast-parser`.

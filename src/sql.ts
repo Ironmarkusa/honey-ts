@@ -240,8 +240,10 @@ export function sqlKw(k: string | symbol | null | undefined): string {
     return n.substring(1);
   }
 
-  // Strip leading % (function call indicator)
-  if (n.startsWith("%")) {
+  // Strip leading % (function call indicator). A bare "%" is the modulo
+  // operator, not an empty function name — stripping it would silently delete
+  // the operator and turn `a % 7` into `a  7`.
+  if (n.length > 1 && n.startsWith("%")) {
     n = n.substring(1);
   }
 
@@ -890,6 +892,80 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
     return [sql, ...params];
   }],
 
+  // TRY_CAST(x AS TYPE) — like CAST but yields NULL instead of erroring.
+  ["try-cast", (k, [x, type], ctx) => {
+    requireDialect(ctx, "duckdb", "TRY_CAST");
+    const [sqlX, ...pX] = formatExpr(x!, ctx);
+    const typeSql = typeof type === "string"
+      ? sqlKw(mapType(type, ctx))
+      : formatExpr(type!, ctx)[0];
+    return [`TRY_CAST(${sqlX} AS ${typeSql})`, ...pX];
+  }],
+
+  // Aggregate with an ordered input: list(v ORDER BY v).
+  // Stored as ["agg-order-by", <fn call>, [<order by items>]] so the ORDER BY
+  // survives as data rather than as text inside the call.
+  ["agg-order-by", (k, [call, orderBy], ctx) => {
+    const params: unknown[] = [];
+
+    if (!Array.isArray(call) || typeof call[0] !== "string") {
+      throw new Error("agg-order-by expects a function call as its first argument");
+    }
+    const fnName = sqlKw(call[0]);
+    const [argSqls, argParams] = formatExprList(call.slice(1) as SqlExpr[], ctx);
+    params.push(...argParams);
+
+    const items = Array.isArray(orderBy) ? orderBy : [orderBy];
+    const orderSqls = items.map((item) => {
+      // Each item is either an expression or [expr, "asc"|"desc"].
+      if (Array.isArray(item) && item.length === 2 && typeof item[1] === "string" &&
+          /^(asc|desc)$/i.test(item[1])) {
+        const [sql, ...p] = formatExpr(item[0] as SqlExpr, ctx);
+        params.push(...p);
+        return `${sql} ${item[1].toUpperCase()}`;
+      }
+      const [sql, ...p] = formatExpr(item as SqlExpr, ctx);
+      params.push(...p);
+      return sql;
+    });
+
+    const args = argSqls.length ? `${argSqls.join(", ")} ` : "";
+    return [`${fnName}(${args}ORDER BY ${orderSqls.join(", ")})`, ...params];
+  }],
+
+  // Array/list subscript: ["at", x, i] -> x[i]
+  //
+  // Not dialect-gated: subscripting is spelled the same in PostgreSQL and
+  // DuckDB. Without this the expression fell through to the generic function
+  // path and emitted `AT(x, i)`, which is not a function in either dialect.
+  ["at", (k, [x, index], ctx) => {
+    const [sqlX, ...pX] = formatExpr(x!, ctx);
+    const [sqlI, ...pI] = formatExpr(index!, ctx);
+    return [`${sqlX}[${sqlI}]`, ...pX, ...pI];
+  }],
+
+  // List slice: ["slice", x, from, to] -> x[from:to]
+  ["slice", (k, [x, from, to], ctx) => {
+    requireDialect(ctx, "duckdb", "list slicing");
+    const params: unknown[] = [];
+    const part = (e: SqlExpr | undefined): string => {
+      if (e === undefined || e === null) return "";
+      const [sql, ...p] = formatExpr(e, ctx);
+      params.push(...p);
+      return sql === "NULL" ? "" : sql;
+    };
+    const [sqlX, ...pX] = formatExpr(x!, ctx);
+    params.unshift(...pX);
+    return [`${sqlX}[${part(from)}:${part(to)}]`, ...params];
+  }],
+
+  // Named argument: ["named-arg", "name", value] -> name := value
+  ["named-arg", (k, [name, value], ctx) => {
+    requireDialect(ctx, "duckdb", "named arguments");
+    const [sql, ...p] = formatExpr(value!, ctx);
+    return [`${formatEntity(String(name), ctx)} := ${sql}`, ...p];
+  }],
+
   // List literal: ["list", a, b, c] -> [a, b, c]
   ["list", (k, args, ctx) => {
     requireDialect(ctx, "duckdb", "list literals");
@@ -1137,6 +1213,19 @@ const specialSyntax = new Map<string, SpecialSyntaxFn>([
 // Clause Formatters
 // ============================================================================
 
+/**
+ * Special-syntax constructs that require two or more arguments.
+ *
+ * A two-element array headed by one of these cannot be that construct, so it is
+ * an `[expr, alias]` pair instead — `["at", "a"]` is the table `at` aliased as
+ * `a`, not a subscript. Names here are plausible identifiers, which is exactly
+ * why the distinction matters.
+ */
+const specialSyntaxMinTwoArgs = new Set<string>([
+  "at", "slice", "named-arg", "cast", "try-cast", "between", "not-between",
+  "agg-order-by", "lambda", "in", "not-in", "over",
+]);
+
 const clauseFormatters = new Map<string, ClauseFormatter>();
 
 // SELECT
@@ -1160,12 +1249,39 @@ function formatSelects(k: string, xs: unknown, ctx: FormatContext): FormatResult
       // item[1] as an argument. Without the specialSyntax check, a one-argument
       // construct such as ["list", "a"] or ["struct", "a"] would be misread as
       // "select column `list` aliased as `a`".
+      //
+      // Constructs needing two or more arguments are exempt: a two-element
+      // array cannot be one of those, so ["at", "a"] is a table named `at`
+      // aliased as `a`, not a subscript missing its index.
+      !(typeof item[0] === "string" &&
+        (item[0].startsWith("%") ||
+          infixOps.has(item[0]) ||
+          (specialSyntax.has(item[0].toLowerCase()) &&
+            !specialSyntaxMinTwoArgs.has(item[0].toLowerCase()))));
+
+    // [expr, [alias, ...columnNames]] — a derived table with a column alias
+    // list, e.g. FROM (VALUES (1,2)) AS t(a, b).
+    const isColumnAliasForm =
+      Array.isArray(item) &&
+      item.length === 2 &&
+      Array.isArray(item[1]) &&
+      item[1].length > 1 &&
+      (item[1] as unknown[]).every((x) => typeof x === "string") &&
       !(typeof item[0] === "string" &&
         (item[0].startsWith("%") ||
           infixOps.has(item[0]) ||
           specialSyntax.has(item[0].toLowerCase())));
 
-    if (isAliasForm) {
+    if (isColumnAliasForm) {
+      const [expr, aliasParts] = item as [SqlExpr, string[]];
+      const [sql, ...p] = formatExpr(expr, ctx);
+      const [alias, ...cols] = aliasParts;
+      const colSql = cols.map((c) => formatEntity(c, ctx, { aliased: true })).join(", ");
+      sqls.push(
+        `${sql} AS ${formatEntity(alias!, ctx, { aliased: true })}(${colSql})`
+      );
+      params.push(...p);
+    } else if (isAliasForm) {
       // [expr, alias] form
       const [expr, alias] = item;
       const [sql, ...p] = formatExpr(expr as SqlExpr, ctx);
