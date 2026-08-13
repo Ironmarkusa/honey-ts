@@ -12,7 +12,8 @@
  */
 
 import {
-  format, type SqlClause, type SqlExpr, type Env,
+  format, createQueryBuilder, analyze,
+  type SqlClause, type SqlExpr, type Env, type DatabaseSchema,
 } from "../../src/index.js";
 import type { Path } from "../../src/paths.js";
 
@@ -63,7 +64,8 @@ const INPUT_BASE =
 
 /** An editable slot. kind: ident | param | lit | fn | type. */
 function slot(value: string, path: Path, kindName: string, color: string): string {
-  return `<input value="${esc(value)}" spellcheck="false" ${grow(value)}
+  const list = kindName === "ident" ? ` list="dl-cols"` : kindName === "fn" ? ` list="dl-fns"` : "";
+  return `<input value="${esc(value)}" spellcheck="false" ${grow(value)}${list}
     data-on:change="$edit = evt.target.value; @post('/edit?path=${p(path)}&kind=${kindName}')"
     class="${INPUT_BASE} ${color}"/>`;
 }
@@ -134,7 +136,7 @@ const ARITH = new Set(["+", "-", "*", "/", "%", "||", "//", "^", "&", "|", "<<",
 // renderExpr — the recursive expression editor
 // ============================================================================
 
-interface Ctx { env: Env; dialect: string; doc: SqlClause }
+interface Ctx { env: Env; dialect: string; doc: SqlClause; depth?: number }
 
 const isPlainObject = (x: unknown): x is Record<string, unknown> =>
   typeof x === "object" && x !== null && !Array.isArray(x);
@@ -178,10 +180,7 @@ export function renderExpr(expr: SqlExpr, path: Path, ctx: Ctx): string {
     if ("__raw" in expr || "raw" in expr) {
       return chip(`<span class="text-slate-400">${esc(exprSql(expr, ctx.dialect))}</span>`, null);
     }
-    if (isSubquery(expr)) {
-      const sql = exprSql(expr, ctx.dialect);
-      return chip(`<span class="text-slate-400">(${esc(sql.length > 60 ? sql.slice(0, 57) + "…" : sql)})</span>`, null);
-    }
+    if (isSubquery(expr)) return renderSubquery(expr as SqlClause, path, ctx);
     return chip(esc(exprSql(expr, ctx.dialect)), null);
   }
 
@@ -212,11 +211,7 @@ export function renderExpr(expr: SqlExpr, path: Path, ctx: Ctx): string {
           renderExpr(expr[2] as SqlExpr, [...path, 2], ctx)}${punct("]")}`;
       }
 
-      if (h === "over" && expr.length >= 3) {
-        const spec = exprSql(expr as SqlExpr, ctx.dialect).replace(/^.*?OVER\s*/i, "OVER ");
-        return `${renderExpr(expr[1] as SqlExpr, [...path, 1], ctx)}
-          ${chip(`<span class="text-slate-400">${esc(spec)}</span>`, null)}`;
-      }
+      if (h === "over" && expr.length >= 3) return renderOver(expr, path, ctx);
 
       if (h === "case") return renderCase(expr, path, ctx);
 
@@ -333,6 +328,108 @@ function renderStar(expr: SqlExpr[], path: Path, ctx: Ctx): string {
   return `<span class="inline-flex flex-wrap items-center gap-1.5">${parts.join(" ")}</span>`;
 }
 
+/** Window application: fn OVER (PARTITION BY … ORDER BY … [frame]) — all editable. */
+function renderOver(expr: SqlExpr[], path: Path, ctx: Ctx): string {
+  const spec = (expr[2] ?? {}) as Record<string, unknown>;
+  const parts: string[] = [renderExpr(expr[1] as SqlExpr, [...path, 1], ctx), kw("OVER"), punct("(")];
+
+  const partitions = spec["partition-by"] as SqlExpr[] | undefined;
+  if (partitions?.length) {
+    parts.push(kw("PARTITION BY"));
+    partitions.forEach((e, i) => {
+      if (i > 0) parts.push(punct(","));
+      parts.push(renderExpr(e, [...path, 2, "partition-by", i], ctx));
+    });
+    parts.push(`<button data-on:click="@post('/add-item?path=${p([...path, 2, "partition-by"])}&kind=ident')" title="Add partition key"
+      class="rounded-md border border-slate-700 px-1.5 py-0.5 text-[10px] font-semibold text-slate-400 hover:bg-slate-700 hover:text-slate-200">+</button>`);
+  }
+
+  const orders = spec["order-by"] as SqlExpr[] | undefined;
+  if (orders?.length) {
+    parts.push(kw("ORDER BY"));
+    orders.forEach((o, i) => {
+      if (i > 0) parts.push(punct(","));
+      const isPair = Array.isArray(o) && o.length === 2 && (o[1] === "asc" || o[1] === "desc");
+      const e = isPair ? (o as SqlExpr[])[0] : o;
+      const ePath: Path = isPair ? [...path, 2, "order-by", i, 0] : [...path, 2, "order-by", i];
+      const dir = isPair ? String((o as SqlExpr[])[1]) : "asc";
+      parts.push(renderExpr(e as SqlExpr, ePath, ctx));
+      parts.push(`<button data-on:click="@post('/order-dir?path=${p([...path, 2, "order-by", i])}')"
+        class="rounded bg-slate-700/80 px-1.5 text-[10px] font-bold ${dir === "desc" ? "text-rose-300" : "text-emerald-300"} hover:brightness-125">${dir.toUpperCase()}</button>`);
+    });
+  }
+
+  for (const [k, v] of Object.entries(spec)) {
+    if (k === "partition-by" || k === "order-by") continue;
+    parts.push(`<span class="font-mono text-[10px] text-slate-500">${esc(k)}: ${esc(JSON.stringify(v))}</span>`);
+  }
+
+  parts.push(punct(")"));
+  return `<span class="inline-flex flex-wrap items-center gap-1.5">${parts.join(" ")}</span>`;
+}
+
+const SUB_CLAUSE_KEYS = ["select", "from", "where"] as const;
+
+/** A nested SELECT rendered as a mini-builder — same paths, same routes. */
+function renderSubquery(sub: SqlClause, path: Path, ctx: Ctx): string {
+  const depth = ctx.depth ?? 0;
+  if (depth >= 3) {
+    const sql = exprSql(sub, ctx.dialect);
+    return chip(`<span class="text-slate-400">(${esc(sql.length > 60 ? sql.slice(0, 57) + "…" : sql)})</span>`, null);
+  }
+  const sctx: Ctx = { ...ctx, depth: depth + 1 };
+  const rows: string[] = [];
+
+  const label = (s: string) =>
+    `<span class="w-14 shrink-0 pt-1.5 text-right font-mono text-[9px] font-bold uppercase tracking-widest text-slate-600">${s}</span>`;
+
+  const selItems = sub.select === undefined ? [] : Array.isArray(sub.select) ? sub.select : [sub.select];
+  if (selItems.length) {
+    rows.push(`<div class="flex items-start gap-2">${label("select")}
+      <div class="flex flex-wrap items-center gap-1.5">${
+        selItems.map((item, i) => renderSelectItem(item as SqlExpr, [...path, "select", i], sctx)).join(punct(","))
+      }</div></div>`);
+  }
+
+  const fromItems = sub.from === undefined ? [] : Array.isArray(sub.from) ? sub.from : [sub.from];
+  if (fromItems.length) {
+    const fromLabel = (f: SqlExpr): string => {
+      if (Array.isArray(f) && f.length === 2 && typeof f[1] === "string") {
+        return `${esc(exprSql(f[0] as SqlExpr, ctx.dialect))} <span class="text-slate-500">AS</span> ${esc(String(f[1]))}`;
+      }
+      return esc(exprSql(f, ctx.dialect));
+    };
+    rows.push(`<div class="flex items-start gap-2">${label("from")}
+      <div class="flex flex-wrap items-center gap-1.5 pt-0.5 font-mono text-xs text-slate-300">${
+        fromItems.map((f) => fromLabel(f as SqlExpr)).join(", ")
+      }</div></div>`);
+  }
+
+  if (sub.where !== undefined) {
+    rows.push(`<div class="flex items-start gap-2">${label("where")}
+      <div class="min-w-0 flex-1">${renderWhereNode(sub.where as SqlExpr, [...path, "where"], sctx)}</div></div>`);
+  }
+
+  const rest = Object.keys(sub).filter((k) => !(SUB_CLAUSE_KEYS as readonly string[]).includes(k));
+  if (rest.length) {
+    const restDoc = Object.fromEntries(rest.map((k) => [k, sub[k]])) as SqlClause;
+    rows.push(`<div class="flex items-start gap-2">${label("")}
+      <span class="pt-0.5 font-mono text-[10px] text-slate-500">${esc(exprSql(restDoc, ctx.dialect))}</span></div>`);
+  }
+
+  return `<span class="block min-w-0 rounded-xl border border-slate-600/60 bg-slate-900/60 p-2.5 space-y-1.5">${rows.join("")}</span>`;
+}
+
+/** Wrap-in-function button: turns expr into ["%lower", expr] (name then editable). */
+const wrapFnBtn = (path: Path) => `
+  <button data-on:click="@post('/wrap?path=${p(path)}&kind=fn')" title="Wrap in function"
+    class="grid h-5 w-5 shrink-0 place-items-center rounded-full font-mono text-[11px] italic text-slate-500 hover:bg-amber-500/20 hover:text-amber-300 transition-colors">ƒ</button>`;
+
+/** Wrap-in-NOT button for predicates. */
+const wrapNotBtn = (path: Path) => `
+  <button data-on:click="@post('/wrap?path=${p(path)}&kind=not')" title="Negate (wrap in NOT)"
+    class="grid h-5 w-5 shrink-0 place-items-center rounded-full font-mono text-[11px] font-bold text-slate-500 hover:bg-violet-500/20 hover:text-violet-300 transition-colors">¬</button>`;
+
 /** [expr, alias] in select position → expr AS alias, both editable. */
 function renderSelectItem(item: SqlExpr, path: Path, ctx: Ctx): string {
   if (
@@ -341,10 +438,10 @@ function renderSelectItem(item: SqlExpr, path: Path, ctx: Ctx): string {
     !(typeof item[0] === "string" && item[0].startsWith("%")) &&
     !(typeof item[0] === "string" && ARITH.has(item[0]))
   ) {
-    return `${renderExpr(item[0] as SqlExpr, [...path, 0], ctx)} ${kw("AS")} ${
+    return `${renderExpr(item[0] as SqlExpr, [...path, 0], ctx)}${wrapFnBtn([...path, 0])} ${kw("AS")} ${
       slot(String(item[1]), [...path, 1], "ident", "text-sky-300")}`;
   }
-  return renderExpr(item, path, ctx);
+  return `${renderExpr(item, path, ctx)}${wrapFnBtn(path)}`;
 }
 
 // ============================================================================
@@ -377,7 +474,7 @@ function renderWhereNode(expr: SqlExpr, path: Path, ctx: Ctx): string {
     const head = String(expr[0]).toLowerCase();
     if (head === "and" || head === "or") return renderGroup(expr as SqlExpr[], path, ctx);
   }
-  return `<div class="flex flex-wrap items-center gap-1.5">${renderExpr(expr, path, ctx)}${removeBtn(path)}</div>`;
+  return `<div class="flex flex-wrap items-center gap-1.5">${renderExpr(expr, path, ctx)}${wrapNotBtn(path)}${removeBtn(path)}</div>`;
 }
 
 // ============================================================================
@@ -392,6 +489,28 @@ export function renderBuilder(doc: SqlClause | null, dialect: string, env: Env):
   }
   const ctx: Ctx = { env, dialect, doc };
   const out: string[] = [];
+  const schema = (env.config as { schema?: DatabaseSchema }).schema;
+
+  // Autocomplete datalists: alias-qualified columns of in-query tables + fn names.
+  if (schema) {
+    const aliasMap = (() => {
+      try { return analyze.getTableAliases(doc).aliases; } catch { return new Map<string, string>(); }
+    })();
+    const cols: string[] = [];
+    for (const [tableName, alias] of aliasMap) {
+      const table = schema.tables.find((t) => t.name === tableName);
+      if (!table) continue;
+      for (const c of table.columns) cols.push(`${alias || tableName}.${c.name}`);
+      if (aliasMap.size === 1) for (const c of table.columns) cols.push(c.name);
+    }
+    const fns = new Set<string>();
+    for (const t of FALLBACK_TYPES) {
+      for (const f of env.functionsFor(t)) fns.add(f.name.replace(/^%/, ""));
+    }
+    out.push(`
+      <datalist id="dl-cols">${cols.map((c) => `<option value="${esc(c)}"></option>`).join("")}</datalist>
+      <datalist id="dl-fns">${[...fns].sort().map((f) => `<option value="${esc(f)}"></option>`).join("")}</datalist>`);
+  }
 
   // SELECT ------------------------------------------------------------------
   const selectItems = doc.select === undefined ? [] : Array.isArray(doc.select) ? doc.select : [doc.select];
@@ -440,6 +559,20 @@ export function renderBuilder(doc: SqlClause | null, dialect: string, env: Env):
         </span>`);
     });
   }
+  // FK-based join suggestions (ghost buttons).
+  if (schema) {
+    try {
+      const joinable = createQueryBuilder(schema).getJoinableTables(doc);
+      for (const j of joinable) {
+        joinRows.push(`
+          <button data-on:click="@post('/add-join?table=${encodeURIComponent(j.table.name)}')"
+            class="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-slate-600 px-2.5 py-1 font-mono text-xs text-slate-500 hover:border-emerald-500/60 hover:text-emerald-300 transition-colors">
+            + ${esc(j.joinType.toUpperCase())} JOIN ${esc(j.table.name)}
+            <span class="text-slate-600">ON ${esc(exprSql(j.suggestedOn, dialect))}</span>
+          </button>`);
+      }
+    } catch { /* suggestions are best-effort */ }
+  }
   if (joinRows.length) {
     out.push(`<div>${sectionLabel("From / Joins")}<div class="flex flex-wrap gap-1.5">${joinRows.join("")}</div></div>`);
   }
@@ -469,18 +602,19 @@ export function renderBuilder(doc: SqlClause | null, dialect: string, env: Env):
 
   // GROUP BY -----------------------------------------------------------------
   const groupItems = doc["group-by"] === undefined ? [] : Array.isArray(doc["group-by"]) ? doc["group-by"] : [doc["group-by"]];
-  if (groupItems.length) {
-    out.push(`<div>${sectionLabel("Group by")}<div class="flex flex-wrap items-center gap-1.5">${
-      groupItems.map((g, i) => `
-        <span class="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/60 px-2 py-1">
-          ${renderExpr(g as SqlExpr, ["group-by", i], ctx)}${removeBtn(["group-by", i])}
-        </span>`).join("")
-    }</div></div>`);
-  }
+  const addBtn = (route: string, label: string) => `
+    <button data-on:click="@post('${route}')"
+      class="rounded-lg border border-dashed border-slate-600 px-2 py-1 text-[11px] font-semibold text-slate-500 hover:border-sky-500/60 hover:text-sky-300 transition-colors">${label}</button>`;
+  out.push(`<div>${sectionLabel("Group by")}<div class="flex flex-wrap items-center gap-1.5">${
+    groupItems.map((g, i) => `
+      <span class="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/60 px-2 py-1">
+        ${renderExpr(g as SqlExpr, ["group-by", i], ctx)}${removeBtn(["group-by", i])}
+      </span>`).join("")
+  }${addBtn("/add-groupby", "+ group by")}</div></div>`);
 
   // ORDER BY -----------------------------------------------------------------
   const orderItems = doc["order-by"] === undefined ? [] : Array.isArray(doc["order-by"]) ? doc["order-by"] : [doc["order-by"]];
-  if (orderItems.length) {
+  {
     out.push(`<div>${sectionLabel("Order by")}<div class="flex flex-wrap items-center gap-1.5">${
       orderItems.map((o, i) => {
         const isPair = Array.isArray(o) && o.length === 2 && (o[1] === "asc" || o[1] === "desc");
@@ -495,7 +629,7 @@ export function renderBuilder(doc: SqlClause | null, dialect: string, env: Env):
           ${removeBtn(["order-by", i])}
         </span>`;
       }).join("")
-    }</div></div>`);
+    }${addBtn("/add-orderby", "+ order by")}</div></div>`);
   }
 
   // LIMIT --------------------------------------------------------------------
@@ -565,6 +699,32 @@ export function renderOutput(doc: SqlClause | null, dialect: string, env: Env): 
       <summary class="cursor-pointer text-[11px] text-slate-600 hover:text-slate-400">clause document (JSON)</summary>
       <pre class="mt-2 max-h-64 overflow-auto rounded-xl bg-slate-950 p-4 font-mono text-[11px] leading-relaxed text-slate-400">${esc(JSON.stringify(doc, null, 2))}</pre>
     </details>
+  </div>`;
+}
+
+/** Schema-validation problems (unknown columns, ungrouped selects, …) with hints. */
+export function renderProblems(doc: SqlClause | null, env: Env): string {
+  if (!doc) return `<div id="problems"></div>`;
+  let problems: Array<{ severity: string; code: string; scope?: string; message: string; hint?: string }> = [];
+  try {
+    problems = env.validate(doc).problems as typeof problems;
+  } catch { /* validation is best-effort on odd documents */ }
+  if (!problems.length) return `<div id="problems"></div>`;
+  return `
+  <div id="problems" class="space-y-1.5">
+    ${problems.map((pr) => {
+      const isErr = pr.severity === "error";
+      return `
+      <div class="flex items-start gap-2.5 rounded-xl border ${isErr
+        ? "border-rose-500/30 bg-rose-950/20" : "border-amber-500/30 bg-amber-950/20"} px-3.5 py-2 text-xs">
+        <span class="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${isErr ? "bg-rose-400" : "bg-amber-400"}"></span>
+        <div class="min-w-0">
+          <span class="${isErr ? "text-rose-300" : "text-amber-300"}">${esc(pr.message)}</span>
+          ${pr.hint ? `<span class="ml-1.5 italic text-slate-400">${esc(pr.hint)}</span>` : ""}
+          <span class="ml-1.5 font-mono text-[10px] text-slate-600">${esc(pr.code)}${pr.scope ? ` · ${esc(pr.scope)}` : ""}</span>
+        </div>
+      </div>`;
+    }).join("")}
   </div>`;
 }
 

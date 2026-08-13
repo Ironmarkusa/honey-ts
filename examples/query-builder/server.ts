@@ -19,7 +19,8 @@ import {
 } from "../../src/index.js";
 import { DUCKDB_FUNCTIONS_BY_NAME } from "../../src/duckdb-ops.generated.js";
 import type { Path } from "../../src/paths.js";
-import { renderBuilder, renderOutput, renderStatus } from "./render.js";
+import { createQueryBuilder } from "../../src/builder.js";
+import { renderBuilder, renderOutput, renderProblems, renderStatus } from "./render.js";
 
 const PORT = Number(process.env.PORT ?? 4321);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -135,6 +136,7 @@ interface Signals {
   edit?: string;
   newcol?: string;
   docjson?: string;
+  history?: string;
 }
 
 function getDoc(signals: Signals): SqlClause | null {
@@ -163,14 +165,45 @@ function respond(
   res: ServerResponse,
   doc: SqlClause | null,
   dialect: string,
-  status: string | null = null
+  status: string | null = null,
+  history?: string,
+  extraSignals?: Record<string, unknown>
 ): void {
   sseStart(res);
-  patchSignals(res, { docjson: doc ? JSON.stringify(doc) : "" });
+  patchSignals(res, {
+    docjson: doc ? JSON.stringify(doc) : "",
+    ...(history !== undefined ? { history } : {}),
+    ...extraSignals,
+  });
   patchElements(res, renderBuilder(doc, dialect, envFor(dialect)));
   patchElements(res, renderOutput(doc, dialect, envFor(dialect)));
+  patchElements(res, renderProblems(doc, envFor(dialect)));
   patchElements(res, renderStatus(status));
   res.end();
+}
+
+/** Current document snapshot pushed onto the undo stack (capped at 50). */
+function pushedHistory(signals: Signals): string | undefined {
+  if (!signals.docjson) return undefined;
+  try {
+    const h = JSON.parse(signals.history ?? "[]") as string[];
+    h.push(signals.docjson);
+    while (h.length > 50) h.shift();
+    return JSON.stringify(h);
+  } catch {
+    return undefined;
+  }
+}
+
+/** respond() for mutating routes: snapshots the pre-edit document for undo. */
+function respondM(
+  res: ServerResponse,
+  signals: Signals,
+  doc: SqlClause | null,
+  status: string | null = null,
+  extraSignals?: Record<string, unknown>
+): void {
+  respond(res, doc, signals.dialect ?? "postgres", status, pushedHistory(signals), extraSignals);
 }
 
 // ============================================================================
@@ -191,7 +224,7 @@ const routes: Record<string, Handler> = {
     try {
       const doc =
         dialect === "duckdb" ? fromSql(sql, { dialect: "duckdb" }) : fromSql(sql);
-      respond(res, doc, dialect);
+      respond(res, doc, dialect, null, "[]"); // fresh document, fresh undo stack
     } catch (e) {
       respond(res, getDoc(signals), dialect, e instanceof Error ? e.message : String(e));
     }
@@ -214,7 +247,7 @@ const routes: Record<string, Handler> = {
       : kind === "lit" ? ({ v: coerceScalar(edit) } as SqlExpr)
       : kind === "fn" ? (("%" + edit.trim().replace(/^%/, "").toLowerCase()) as SqlExpr)
       : (edit.trim() as SqlExpr);
-    respond(res, paths.setAt(doc, path, value), signals.dialect ?? "postgres");
+    respondM(res, signals, paths.setAt(doc, path, value));
   },
 
   // Change a predicate's operator, reshaping the node when the new operator
@@ -249,7 +282,7 @@ const routes: Record<string, Handler> = {
         default: return [op, lhs, prevScalar];
       }
     });
-    respond(res, next, dialect);
+    respondM(res, signals, next);
   },
 
   // Change an arithmetic/concat head in place (same arity, no reshape).
@@ -257,19 +290,20 @@ const routes: Record<string, Handler> = {
     const doc = getDoc(signals);
     if (!doc) return respond(res, null, signals.dialect ?? "postgres");
     const path = JSON.parse(query.get("path") ?? "[]") as Path;
-    respond(res, paths.setAt(doc, [...path, 0], (signals.edit ?? "").trim() as SqlExpr), signals.dialect ?? "postgres");
+    respondM(res, signals, paths.setAt(doc, [...path, 0], (signals.edit ?? "").trim() as SqlExpr));
   },
 
-  // Append a value to an IN-list.
+  // Append an item to a value-list (IN) or expression-list (PARTITION BY).
   "/add-item": (res, signals, query) => {
     const doc = getDoc(signals);
     if (!doc) return respond(res, null, signals.dialect ?? "postgres");
     const path = JSON.parse(query.get("path") ?? "[]") as Path;
+    const item: SqlExpr = query.get("kind") === "ident" ? "column" : ({ $: "" } as SqlExpr);
     const next = paths.updateAt(doc, path, (node) => [
       ...(node as SqlExpr[]),
-      { $: "" } as SqlExpr,
+      item,
     ]);
-    respond(res, next, signals.dialect ?? "postgres");
+    respondM(res, signals, next);
   },
 
   // Strip a wrapper (e.g. NOT) — replaces the node with its operand.
@@ -280,7 +314,7 @@ const routes: Record<string, Handler> = {
     const next = paths.updateAt(doc, path, (node) =>
       Array.isArray(node) && node.length >= 2 ? (node[1] as SqlExpr) : (node as SqlExpr)
     );
-    respond(res, next, signals.dialect ?? "postgres");
+    respondM(res, signals, next);
   },
 
   "/toggle": (res, signals, query) => {
@@ -292,7 +326,7 @@ const routes: Record<string, Handler> = {
       const head = String(arr[0]).toLowerCase() === "and" ? "or" : "and";
       return [head, ...arr.slice(1)];
     });
-    respond(res, next, signals.dialect ?? "postgres");
+    respondM(res, signals, next);
   },
 
   "/add": (res, signals, query) => {
@@ -310,27 +344,70 @@ const routes: Record<string, Handler> = {
     } else {
       next = modify.addWhere(doc, BLANK_CONDITION);
     }
-    respond(res, next, signals.dialect ?? "postgres");
+    respondM(res, signals, next);
   },
 
   "/remove": (res, signals, query) => {
     const doc = getDoc(signals);
     if (!doc) return respond(res, null, signals.dialect ?? "postgres");
     const path = JSON.parse(query.get("path") ?? "[]") as Path;
-    respond(res, paths.removeAt(doc, path), signals.dialect ?? "postgres");
+    respondM(res, signals, paths.removeAt(doc, path));
   },
 
   "/add-select": (res, signals) => {
     const doc = getDoc(signals);
     const col = (signals.newcol ?? "").trim();
     if (!doc || !col) return respond(res, doc, signals.dialect ?? "postgres");
-    const next = modify.addSelect(doc, col);
-    sseStart(res);
-    patchSignals(res, { docjson: JSON.stringify(next), newcol: "" });
-    patchElements(res, renderBuilder(next, signals.dialect ?? "postgres"));
-    patchElements(res, renderOutput(next, signals.dialect ?? "postgres"));
-    patchElements(res, renderStatus(null));
-    res.end();
+    respondM(res, signals, modify.addSelect(doc, col), null, { newcol: "" });
+  },
+
+  // Pop the undo stack and restore that document.
+  "/undo": (res, signals) => {
+    const dialect = signals.dialect ?? "postgres";
+    let h: string[] = [];
+    try { h = JSON.parse(signals.history ?? "[]") as string[]; } catch { /* fresh stack */ }
+    if (!h.length) return respond(res, getDoc(signals), dialect);
+    const prev = h.pop()!;
+    let doc: SqlClause | null = null;
+    try { doc = JSON.parse(prev) as SqlClause; } catch { /* unparseable snapshot */ }
+    respond(res, doc, dialect, null, JSON.stringify(h));
+  },
+
+  // Wrap a node: kind=not → ["not", node]; kind=fn → ["%lower", node] (name editable after).
+  "/wrap": (res, signals, query) => {
+    const doc = getDoc(signals);
+    if (!doc) return respond(res, null, signals.dialect ?? "postgres");
+    const path = JSON.parse(query.get("path") ?? "[]") as Path;
+    const kind = query.get("kind") ?? "not";
+    const next = paths.updateAt(doc, path, (node) =>
+      kind === "fn" ? (["%lower", node] as SqlExpr) : (["not", node] as SqlExpr)
+    );
+    respondM(res, signals, next);
+  },
+
+  // Add a suggested FK join (table name from the suggestion button).
+  "/add-join": (res, signals, query) => {
+    const doc = getDoc(signals);
+    if (!doc) return respond(res, null, signals.dialect ?? "postgres");
+    const table = query.get("table") ?? "";
+    const qb = createQueryBuilder(DEMO_SCHEMA);
+    const hit = qb.getJoinableTables(doc).find((j) => j.table.name === table);
+    if (!hit) return respond(res, doc, signals.dialect ?? "postgres", `No joinable table "${table}".`);
+    respondM(res, signals, qb.addJoin(doc, hit.table.name, hit.suggestedOn, hit.joinType));
+  },
+
+  "/add-groupby": (res, signals) => {
+    const doc = getDoc(signals);
+    if (!doc) return respond(res, null, signals.dialect ?? "postgres");
+    const items = doc["group-by"] === undefined ? [] : Array.isArray(doc["group-by"]) ? doc["group-by"] : [doc["group-by"]];
+    respondM(res, signals, { ...doc, "group-by": [...items, "column"] } as SqlClause);
+  },
+
+  "/add-orderby": (res, signals) => {
+    const doc = getDoc(signals);
+    if (!doc) return respond(res, null, signals.dialect ?? "postgres");
+    const items = doc["order-by"] === undefined ? [] : Array.isArray(doc["order-by"]) ? doc["order-by"] : [doc["order-by"]];
+    respondM(res, signals, { ...doc, "order-by": [...items, ["column", "asc"]] } as SqlClause);
   },
 
   "/set-limit": (res, signals) => {
@@ -344,7 +421,7 @@ const routes: Record<string, Handler> = {
     } else {
       next = { ...doc, limit: $(Number(edit) || 0) };
     }
-    respond(res, next, signals.dialect ?? "postgres");
+    respondM(res, signals, next);
   },
 
   "/order-dir": (res, signals, query) => {
@@ -361,7 +438,7 @@ const routes: Record<string, Handler> = {
       }
       return [node as SqlExpr, "desc"];
     });
-    respond(res, next, signals.dialect ?? "postgres");
+    respondM(res, signals, next);
   },
 };
 
@@ -386,13 +463,19 @@ createServer(async (req, res) => {
     try {
       handler(res, signals, url.searchParams);
     } catch (e) {
-      // Any handler error becomes a status banner rather than a dead socket.
-      respond(
-        res,
-        getDoc(signals),
-        signals.dialect ?? "postgres",
-        e instanceof Error ? e.message : String(e)
-      );
+      console.error(`[${url.pathname}]`, e);
+      // Any handler error becomes a status banner rather than a dead socket —
+      // unless the stream already started, in which case just close it.
+      if (res.headersSent) {
+        res.end();
+      } else {
+        respond(
+          res,
+          getDoc(signals),
+          signals.dialect ?? "postgres",
+          e instanceof Error ? e.message : String(e)
+        );
+      }
     }
     return;
   }

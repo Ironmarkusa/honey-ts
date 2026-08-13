@@ -6,9 +6,14 @@
   <title>honey-ts query builder</title>
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4/dist/index.global.js"></script>
   <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0/bundles/datastar.js"></script>
+  <style>
+    /* datalist-attached inputs: keep autocomplete, drop Chrome's arrow (it eats the ch-based widths) */
+    input::-webkit-calendar-picker-indicator { display: none !important; }
+  </style>
 </head>
 <body class="min-h-screen bg-slate-950 text-slate-200 antialiased"
-      data-signals="{sql: '', dialect: 'postgres', edit: '', newcol: '', docjson: ''}">
+      data-signals="{sql: '', dialect: 'postgres', edit: '', newcol: '', docjson: '', history: '[]'}"
+      data-on:keydown__window="(evt.metaKey || evt.ctrlKey) && evt.key === 'z' && !['INPUT','TEXTAREA','SELECT'].includes(evt.target.tagName) && @post('/undo')">
 
   <div class="mx-auto max-w-5xl px-6 py-10 space-y-6">
 
@@ -23,6 +28,12 @@
           Paste SQL → it becomes a plain-data document → edit visually → SQL re-emits live.
         </p>
       </div>
+      <div class="flex items-center gap-2">
+      <button id="undo" data-on:click="@post('/undo')" title="Undo (⌘Z)"
+        data-class="{'opacity-30 pointer-events-none': $history === '[]'}"
+        class="rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-400 transition hover:bg-slate-800 hover:text-slate-200">
+        ↩ undo
+      </button>
       <div class="flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-900 p-1 text-xs font-semibold">
         <button data-on:click="$dialect = 'postgres'; @post('/render')"
           data-class="{'bg-sky-500/20 text-sky-300': $dialect === 'postgres', 'text-slate-500': $dialect !== 'postgres'}"
@@ -30,6 +41,7 @@
         <button data-on:click="$dialect = 'duckdb'; @post('/render')"
           data-class="{'bg-amber-500/20 text-amber-300': $dialect === 'duckdb', 'text-slate-500': $dialect !== 'duckdb'}"
           class="rounded-lg px-3 py-1.5 transition-colors">duckdb</button>
+      </div>
       </div>
     </header>
 
@@ -57,6 +69,9 @@
 
     <!-- status / errors -->
     <div id="status"></div>
+
+    <!-- schema-validation problems -->
+    <div id="problems"></div>
 
     <!-- builder -->
     <div id="builder" class="grid place-items-center rounded-2xl border border-dashed border-slate-700 p-10 text-sm text-slate-500">

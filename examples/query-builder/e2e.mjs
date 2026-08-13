@@ -137,5 +137,75 @@ if (argInput) {
 }
 await page.screenshot({ path: `${shots}/7-fn-arg-edit.png`, fullPage: true });
 
+// 9. Undo reverts the last edit (analytics sample still loaded, o.subtotal edit applied)
+await page.click("#undo");
+await page.waitForTimeout(600);
+const outUndo = await page.textContent("#output");
+step("undo reverts edit", outUndo.includes("o.total") && !outUndo.includes("o.subtotal"), outUndo.slice(0, 120).replace(/\s+/g, " "));
+
+// 10. Validation problems surface with did-you-mean hints
+const identInputs = page.locator("#builder input[data-on\\:change*='kind=ident']");
+const idn = await identInputs.count();
+let planInput = null;
+for (let i = 0; i < idn; i++) {
+  if ((await identInputs.nth(i).inputValue()) === "u.plan") { planInput = identInputs.nth(i); break; }
+}
+if (planInput) {
+  await planInput.fill("u.plann");
+  await planInput.dispatchEvent("change");
+  await page.waitForTimeout(600);
+  const problems = await page.textContent("#problems");
+  step("validation problem with hint", /unknown|did you mean/i.test(problems), problems.slice(0, 160).replace(/\s+/g, " "));
+  await page.screenshot({ path: `${shots}/8-validation.png`, fullPage: true });
+  await page.click("#undo");
+  await page.waitForTimeout(500);
+} else {
+  step("validation problem with hint", false, "no u.plan ident input");
+}
+
+// 11. FK join suggestion adds a join
+const joinBtn = page.locator("#builder button", { hasText: /JOIN companies/i }).first();
+if (await joinBtn.count()) {
+  await joinBtn.click();
+  await page.waitForTimeout(600);
+  const outJoin = await page.textContent("#output");
+  step("join suggestion adds JOIN", /JOIN companies/i.test(outJoin), outJoin.slice(0, 200).replace(/\s+/g, " "));
+} else {
+  step("join suggestion adds JOIN", false, "no companies suggestion rendered");
+}
+
+// 12. Wrap a predicate in NOT
+await page.click("text=nested logic");
+await page.waitForTimeout(600);
+await page.click("#builder button[title='Negate (wrap in NOT)']");
+await page.waitForTimeout(600);
+const outNot = await page.textContent("#output");
+step("wrap in NOT", /NOT/.test(outNot), outNot.slice(0, 160).replace(/\s+/g, " "));
+
+// 13. Subqueries render granularly and edit through paths
+await page.fill("textarea", "SELECT u.plan FROM users u WHERE NOT EXISTS (SELECT 1 FROM refunds r WHERE r.order_id = u.id)");
+await page.click("text=Parse →");
+await page.waitForTimeout(700);
+const subInputs = page.locator("#builder input[data-on\\:change*='kind=ident']");
+const sn = await subInputs.count();
+let subInput = null;
+for (let i = 0; i < sn; i++) {
+  if ((await subInputs.nth(i).inputValue()) === "r.order_id") { subInput = subInputs.nth(i); break; }
+}
+if (subInput) {
+  await subInput.fill("r.oid");
+  await subInput.dispatchEvent("change");
+  await page.waitForTimeout(600);
+  const outSub = await page.textContent("#output");
+  step("subquery edit re-emits", outSub.includes("r.oid"), outSub.slice(0, 200).replace(/\s+/g, " "));
+} else {
+  step("subquery edit re-emits", false, "no r.order_id input inside subquery");
+}
+await page.screenshot({ path: `${shots}/9-subquery.png`, fullPage: true });
+
+// 14. Autocomplete datalists exist with column options
+const dlCount = await page.locator("#builder datalist#dl-cols option").count();
+step("column datalist populated", dlCount > 0, `${dlCount} options`);
+
 step("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
 await browser.close();
