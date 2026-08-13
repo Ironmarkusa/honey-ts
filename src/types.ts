@@ -195,7 +195,7 @@ export interface SqlClause {
 
 export interface FormatOptions {
   /** SQL dialect */
-  dialect?: "ansi" | "postgres" | "mysql" | "sqlite" | "sqlserver" | "oracle";
+  dialect?: "ansi" | "postgres" | "mysql" | "sqlite" | "sqlserver" | "oracle" | "duckdb";
   /** Quote all identifiers */
   quoted?: boolean;
   /** Convert dashes to underscores even when quoted */
@@ -229,6 +229,22 @@ export interface DialectConfig {
   as?: boolean;
   /** Auto-lift boolean values to parameters */
   autoLiftBoolean?: boolean;
+  /**
+   * Operators this dialect cannot express at all. Formatting one throws rather
+   * than emitting SQL the target would reject at query time.
+   */
+  unsupportedOps?: Set<string>;
+  /**
+   * Operators rewritten to an equivalent expression before formatting, e.g.
+   * PostgreSQL `["~*", a, b]` becomes `["%regexp_matches", a, b, {v: "i"}]`
+   * on DuckDB. Receives the operator's arguments, returns a replacement expr.
+   */
+  opLowerings?: Map<string, (args: SqlExpr[]) => SqlExpr>;
+  /**
+   * Type-name translations applied to casts and typed values, e.g. `jsonb` has
+   * no DuckDB equivalent and maps to `JSON`. Keys are compared lowercased.
+   */
+  typeAliases?: Map<string, string>;
 }
 
 // ============================================================================
@@ -355,6 +371,13 @@ const clauseKeys = new Set([
   "union", "union-all", "intersect", "except", "except-all",
   "create-table", "drop-table", "alter-table", "truncate",
   "raw", "nest", "for", "lock", "window", "partition-by",
+  // DuckDB dialect clause keys — without these, a single-key clause map like
+  // {describe: "t"} would be misread as the typed value 't'::describe.
+  "describe", "summarize", "show", "pivot", "unpivot",
+  "qualify", "sample", "by-name", "frame",
+  "insert-or-replace-into", "insert-or-ignore-into",
+  "asof-join", "asof-left-join", "asof-right-join", "asof-full-join",
+  "asof-inner-join", "semi-join", "anti-join", "positional-join",
 ]);
 
 /**
