@@ -59,6 +59,7 @@ export interface FromSqlOptions {
   dialect?: "postgres" | "duckdb";
 }
 
+import { isClause } from "./types.js";
 import type { SqlClause, SqlExpr } from "./types.js";
 
 // ============================================================================
@@ -134,7 +135,14 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
         "is not": "is-not",
       };
 
-      return [opMap[op] ?? op, left, right];
+      const mapped = opMap[op] ?? op;
+      // IN's RHS is grammatically a parenthesized list or a subquery — never a
+      // bare scalar. pgsql-ast-parser reads `IN ('x')` as a parenthesized
+      // scalar, which would round-trip to the invalid `IN 'x'`; keep list-ness.
+      if ((mapped === "in" || mapped === "not-in") && !Array.isArray(right) && !isClause(right)) {
+        return [mapped, left, [right]];
+      }
+      return [mapped, left, right];
     }
 
     case "unary": {
@@ -298,8 +306,13 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
     case "integer":
       return { v: (expr as ExprInteger).value };
 
-    case "numeric":
-      return { v: (expr as ExprNumeric).value };
+    case "numeric": {
+      const value = (expr as ExprNumeric).value;
+      // An integer-valued float literal (`100.0`) is indistinguishable from
+      // `100` as a JS number, but the decimal point changes the SQL type
+      // (DECIMAL vs INTEGER). Mark it so emission keeps the point.
+      return Number.isInteger(value) ? { v: value, float: true } : { v: value };
+    }
 
     case "string":
       return { v: (expr as ExprString).value };

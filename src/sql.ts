@@ -541,6 +541,15 @@ export function formatExpr(expr: SqlExpr, ctx: FormatContext, opts: { nested?: b
 
   // Literal value (always inlined, never parameterized)
   if (isLiteral(expr)) {
+    // {v: 100, float: true} — an integer-valued float literal; keep the
+    // decimal point so the SQL type stays DECIMAL rather than INTEGER.
+    if (
+      (expr as { float?: boolean }).float === true &&
+      typeof expr.v === "number" &&
+      Number.isInteger(expr.v)
+    ) {
+      return [`${expr.v}.0`];
+    }
     return [sqlizeValue(expr.v)];
   }
 
@@ -788,6 +797,14 @@ function formatIn(
     const [sqls, params] = formatExprList(y, ctx);
     const sql = `${sqlX} ${sqlKw(op)} (${sqls.join(", ")})`;
     return [nested ? `(${sql})` : sql, ...paramsX, ...params];
+  }
+
+  // Scalar value RHS (hand-written one-element IN) — IN demands parens:
+  // `IN ($1)`, never the invalid `IN $1`.
+  if (isLiteral(y) || isTypedValue(y) || isParam(y)) {
+    const [sqlY, ...paramsY] = formatExpr(y, ctx, { nested: true });
+    const sql = `${sqlX} ${sqlKw(op)} (${sqlY})`;
+    return [nested ? `(${sql})` : sql, ...paramsX, ...paramsY];
   }
 
   // Otherwise format as expression (could be subquery, param reference, etc.)

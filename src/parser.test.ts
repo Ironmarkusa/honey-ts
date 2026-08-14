@@ -414,3 +414,43 @@ describe("normalizeSql", () => {
     assert.strictEqual(normalizeSql(sql1), normalizeSql(sql2));
   });
 });
+
+describe("round-trip regressions", () => {
+  it("keeps single-item IN as a list (never the invalid `IN 'x'`)", () => {
+    const clause = fromSql("SELECT 1 FROM t WHERE a IN ('x')");
+    assert.deepStrictEqual(clause.where, ["in", "a", [{ v: "x" }]]);
+    const [sql] = toSql(clause);
+    assert.strictEqual(sql, "SELECT 1 FROM t WHERE a IN ('x')");
+  });
+
+  it("keeps single-item NOT IN as a list", () => {
+    const [sql] = toSql(fromSql("SELECT 1 FROM t WHERE a NOT IN (5)"));
+    assert.strictEqual(sql, "SELECT 1 FROM t WHERE a NOT IN (5)");
+  });
+
+  it("does not wrap IN with a subquery RHS", () => {
+    const [sql] = toSql(fromSql("SELECT 1 FROM t WHERE a IN (SELECT b FROM u)"));
+    assert.strictEqual(sql, "SELECT 1 FROM t WHERE a IN (SELECT b FROM u)");
+  });
+
+  it("emits a scalar-value IN RHS with parens", () => {
+    const [sql] = toSql({ select: [{ v: 1 }], from: "t", where: ["in", "a", { v: "x" }] });
+    assert.strictEqual(sql, "SELECT 1 FROM t WHERE a IN ('x')");
+  });
+
+  it("keeps the decimal point on integer-valued float literals", () => {
+    const clause = fromSql("SELECT ROUND(x * 100.0) FROM t");
+    const [sql] = toSql(clause);
+    assert.strictEqual(sql, "SELECT ROUND(x * 100.0) FROM t");
+  });
+
+  it("leaves true integer literals alone", () => {
+    const [sql] = toSql(fromSql("SELECT x * 100 FROM t"));
+    assert.strictEqual(sql, "SELECT x * 100 FROM t");
+  });
+
+  it("keeps non-integer float literals verbatim", () => {
+    const [sql] = toSql(fromSql("SELECT x * 0.2164 FROM t"));
+    assert.strictEqual(sql, "SELECT x * 0.2164 FROM t");
+  });
+});

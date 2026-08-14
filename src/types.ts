@@ -29,7 +29,7 @@ export type SqlRaw = { __raw: string | (string | SqlExpr)[] };
 export type SqlLift = { __lift: unknown };
 
 /** Literal SQL constant (always inlined, never parameterized) */
-export type SqlLiteral = { v: unknown };
+export type SqlLiteral = { v: unknown; float?: true };
 
 /**
  * Typed value - becomes a parameterized value with optional cast
@@ -266,7 +266,7 @@ export const SqlRawSchema = z.object({
 
 export const SqlLiftSchema = z.object({ __lift: z.unknown() });
 
-export const SqlLiteralSchema = z.object({ v: z.unknown() });
+export const SqlLiteralSchema = z.object({ v: z.unknown(), float: z.literal(true).optional() });
 
 // Recursive schema for expressions
 export const SqlExprSchema: z.ZodType<SqlExpr> = z.lazy(() =>
