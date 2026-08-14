@@ -144,9 +144,13 @@ export function collectTables(clause: SqlClause): string[] {
   });
 
   walkClauseTree(clause, (c) => {
-    // FROM clause
-    if (c.from) {
-      extractTableNames(c.from, tables);
+    // FROM is a LIST of entries (string, [name, alias], or [subquery, alias])
+    // — an aliased table nested in the list must not slip past allowedTables.
+    if (c.from !== undefined) {
+      const fromItems = Array.isArray(c.from) ? c.from : [c.from];
+      for (const item of fromItems) {
+        extractTableNames(item as SqlExpr, tables);
+      }
     }
 
     // INSERT/UPDATE/DELETE targets

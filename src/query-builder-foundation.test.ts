@@ -393,3 +393,21 @@ describe("validateQuery: real-world SQL shapes (CTEs, casts, ordinals)", () => {
     assert.deepEqual(res.problems, []);
   });
 });
+
+describe("cross-representation type + table handling", () => {
+  test("typesComparable is case- and alias-insensitive", () => {
+    assert.equal(typesComparable("bigint", "BIGINT"), true);
+    assert.equal(typesComparable("DECIMAL(10,2)", "numeric"), true);
+    assert.equal(typesComparable("VARCHAR", "text"), true);
+    assert.equal(typesComparable("VARCHAR", "BIGINT"), false);
+  });
+
+  test("collectTables sees aliased tables inside a FROM list", async () => {
+    const { collectTables } = await import("./guard.js");
+    const clause = fromSql(
+      "WITH r AS (SELECT id FROM main.users) SELECT d.id FROM main.orders d LEFT JOIN r ON d.id = r.id",
+      { dialect: "duckdb" },
+    );
+    assert.deepEqual(collectTables(clause).sort(), ["main.orders", "main.users"]);
+  });
+});

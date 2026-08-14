@@ -72,9 +72,12 @@ export function normalizeType(raw: string): string {
   return base + (m[2] ?? "") + arraySuffix;
 }
 
-/** Strip precision for family comparisons: numeric(10,2) → numeric. */
+/** Strip precision for family comparisons: numeric(10,2) → numeric.
+ *  Normalizes first — DESCRIBE reports "BIGINT"/"DECIMAL(10,2)" while
+ *  inference produces "bigint"/"numeric"; comparisons must not be case- or
+ *  alias-sensitive. */
 export function baseType(type: string): string {
-  return type.replace(/\(.*\)/, "").replace(/\[\]/g, "").trim();
+  return normalizeType(type).replace(/\(.*\)/, "").replace(/\[\]/g, "").trim();
 }
 
 const NUMERIC_TYPES = new Set(["smallint", "integer", "bigint", "numeric", "double"]);
