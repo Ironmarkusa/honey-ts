@@ -7,7 +7,7 @@
 
 import type { SqlClause, SqlExpr } from "./types.js";
 import { walkClauseTree } from "./rewrites/walk.js";
-import { JOIN_KEYS } from "./traversal.js";
+import { CTE_KEYS, JOIN_KEYS } from "./traversal.js";
 
 export type SqlOperation = "select" | "insert" | "update" | "delete";
 
@@ -130,6 +130,19 @@ export function getOperation(clause: SqlClause): SqlOperation | null {
 export function collectTables(clause: SqlClause): string[] {
   const tables: string[] = [];
 
+  // CTE names are query-internal, not physical tables — an allowedTables
+  // check must not demand (or accept) them.
+  const cteNames = new Set<string>();
+  walkClauseTree(clause, (c) => {
+    for (const key of CTE_KEYS) {
+      const entries = c[key];
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        if (Array.isArray(entry) && typeof entry[0] === "string") cteNames.add(entry[0]);
+      }
+    }
+  });
+
   walkClauseTree(clause, (c) => {
     // FROM clause
     if (c.from) {
@@ -162,7 +175,7 @@ export function collectTables(clause: SqlClause): string[] {
 
   });
 
-  return [...new Set(tables)];
+  return [...new Set(tables)].filter((t) => !cteNames.has(t));
 }
 
 function extractTableNames(expr: SqlExpr, tables: string[]): void {

@@ -21,10 +21,10 @@
 
 import type { SqlClause, SqlExpr } from "./types.js";
 import { isClause, isRaw } from "./types.js";
-import type { DatabaseSchema } from "./builder.js";
+import type { DatabaseSchema, TableSchema } from "./builder.js";
 import { walkClauseTree } from "./rewrites/walk.js";
 import { identString } from "./rewrites/matchers.js";
-import { JOIN_KEYS } from "./traversal.js";
+import { CTE_KEYS, JOIN_KEYS, SET_OP_KEYS } from "./traversal.js";
 import { createInferrer, typesComparable, type InferrerOptions } from "./infer.js";
 
 // ============================================================================
@@ -127,10 +127,98 @@ function nonAggregatedRefs(expr: SqlExpr, out: SqlExpr[]): void {
   }
   if (Array.isArray(expr)) {
     if (isAggregateCall(expr)) return; // columns inside aggregates are fine
-    for (const child of expr.slice(1)) nonAggregatedRefs(child as SqlExpr, out);
+    const head = typeof expr[0] === "string" ? expr[0].toLowerCase() : null;
+    // CAST's last argument is a type name, not a column.
+    if (head === "cast" || head === "try-cast") {
+      nonAggregatedRefs(expr[1] as SqlExpr, out);
+      return;
+    }
+    for (const child of expr.slice(1)) {
+      // CASE's "else" marker is syntax, not a column.
+      if ((head === "case" || head === "case-expr") && child === "else") continue;
+      nonAggregatedRefs(child as SqlExpr, out);
+    }
     return;
   }
   // wrappers/values: nothing to collect
+}
+
+/**
+ * Output column names of a CTE body; null = opaque (star select, or a shape
+ * the aliases can't be derived from).
+ */
+function cteColumns(body: SqlClause): string[] | null {
+  // WITH x (a, b) AS (...) — the parser encodes explicit column aliases as a
+  // [clause, ["__honey_ctecols", ...names]] derived-table wrapper.
+  const fromItems = body.from === undefined ? [] : Array.isArray(body.from) ? body.from : [body.from];
+  for (const f of fromItems) {
+    if (Array.isArray(f) && Array.isArray(f[1]) && f[1][0] === "__honey_ctecols") {
+      return (f[1] as string[]).slice(1);
+    }
+  }
+  for (const key of SET_OP_KEYS) {
+    const branches = body[key];
+    if (Array.isArray(branches) && branches.length > 0) {
+      return cteColumns(branches[0] as SqlClause);
+    }
+  }
+  const items = body.select ?? body["select-distinct"];
+  if (items === undefined) return null;
+  const list = Array.isArray(items) ? items : [items];
+  const out: string[] = [];
+  for (const item of list) {
+    // [expr, alias] — including a plain-string expr, provided the head isn't
+    // a prefix operator reading as [op, arg].
+    if (
+      Array.isArray(item) &&
+      item.length === 2 &&
+      typeof item[1] === "string" &&
+      !(typeof item[0] === "string" && (item[0].startsWith("%") || ["not", "exists", "any", "all", "-", "+", "cast", "array"].includes(item[0].toLowerCase())))
+    ) {
+      out.push(item[1]);
+      continue;
+    }
+    const s = identString(item as SqlExpr);
+    if (s === null || s === "*" || s.endsWith(".*")) return null;
+    const dot = s.lastIndexOf(".");
+    out.push(dot === -1 ? s : s.slice(dot + 1));
+  }
+  return out;
+}
+
+/**
+ * Virtual TableSchema rows for every CTE in the document, so references to
+ * CTE names resolve like tables. Column types are "unknown", which the
+ * comparison checks deliberately skip. CTEs whose output columns can't be
+ * derived (star selects) are also returned in `opaque` — scopes reading from
+ * one skip column validation rather than reporting noise.
+ */
+function collectCteSchemas(clause: SqlClause): { tables: TableSchema[]; opaque: Set<string> } {
+  const tables: TableSchema[] = [];
+  const opaque = new Set<string>();
+  walkClauseTree(clause, (c) => {
+    for (const key of CTE_KEYS) {
+      const entries = c[key];
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        if (!Array.isArray(entry) || typeof entry[0] !== "string") continue;
+        const body = entry[1];
+        if (!isClause(body)) continue;
+        const cols = cteColumns(body as SqlClause);
+        if (cols === null) {
+          opaque.add(entry[0]);
+          tables.push({ name: entry[0], schema: "", columns: [] });
+        } else {
+          tables.push({
+            name: entry[0],
+            schema: "",
+            columns: cols.map((name) => ({ name, type: "unknown", nullable: true })),
+          });
+        }
+      }
+    }
+  });
+  return { tables, opaque };
 }
 
 function containsAggregate(expr: SqlExpr): boolean {
@@ -161,16 +249,23 @@ export function validateQuery(
   options: ValidateOptions = {}
 ): ValidationOutcome {
   const problems: Problem[] = [];
+
+  // CTE names resolve like tables (with "unknown"-typed columns), so a
+  // `FROM my_cte` outer scope validates instead of reporting unknown-table.
+  const { tables: cteTables, opaque: opaqueCtes } = collectCteSchemas(clause);
+  const effSchema: DatabaseSchema =
+    cteTables.length > 0 ? { tables: [...schema.tables, ...cteTables] } : schema;
+
   const tableNames = new Set<string>();
-  for (const t of schema.tables) {
+  for (const t of effSchema.tables) {
     tableNames.add(t.name);
-    tableNames.add(`${t.schema}.${t.name}`);
+    if (t.schema) tableNames.add(`${t.schema}.${t.name}`);
   }
 
   // For cross-table did-you-mean hints when the typo'd column exists on a
   // table that isn't in the query's scope.
   const allColumns: Array<{ name: string; table: string }> = [];
-  for (const t of schema.tables) {
+  for (const t of effSchema.tables) {
     for (const col of t.columns) allColumns.push({ name: col.name, table: t.name });
   }
 
@@ -180,7 +275,7 @@ export function validateQuery(
   const ancestry: Array<{ scope: string; infer: ReturnType<typeof createInferrer> }> = [];
 
   walkClauseTree(clause, (c, scope) => {
-    const infer = createInferrer(schema, c, options);
+    const infer = createInferrer(effSchema, c, options);
     while (
       ancestry.length &&
       !(scope !== ancestry[ancestry.length - 1]!.scope &&
@@ -191,10 +286,14 @@ export function validateQuery(
     const parents = ancestry.slice();
     ancestry.push({ scope, infer });
 
-    /** Resolve in this scope, then walk outward — correlated refs are legal. */
+    /** Resolve in this scope, then walk outward — correlated refs are legal.
+     *  A CTE body is NOT correlated: it cannot see the enclosing query's
+     *  columns, so the outward walk stops at a `with:` boundary. */
     const resolveCorrelated = (s: string): boolean => {
       if (infer.resolveColumn(s)) return true;
       for (let i = parents.length - 1; i >= 0; i--) {
+        const relative = scope.slice(parents[i]!.scope.length);
+        if (relative.includes("with:")) break;
         if (parents[i]!.infer.resolveColumn(s)) return true;
       }
       return false;
@@ -238,7 +337,7 @@ export function validateQuery(
     const scopeColumnNames = (): string[] => {
       const out: string[] = [];
       for (const { name } of tableRefs) {
-        const t = schema.tables.find(
+        const t = effSchema.tables.find(
           (x) => x.name === name || `${x.schema}.${x.name}` === name
         );
         if (t) out.push(...t.columns.map((col) => col.name));
@@ -281,11 +380,19 @@ export function validateQuery(
         return;
       }
       if (Array.isArray(expr)) {
+        const head = typeof expr[0] === "string" ? expr[0].toLowerCase() : null;
+        // CAST's last argument is a type name, not a column.
+        if (head === "cast" || head === "try-cast") {
+          walkRefs(expr[1] as SqlExpr, where);
+          return;
+        }
         // Skip head (operator/function name); check args.
         const start = typeof expr[0] === "string" ? 1 : 0;
         for (let i = start; i < expr.length; i++) {
           const child = expr[i] as SqlExpr;
           if (isClause(child) || isRaw(child)) continue; // subqueries walked separately
+          // CASE's "else" marker is syntax, not a column.
+          if ((head === "case" || head === "case-expr") && child === "else") continue;
           // [expr, alias] select items: don't treat the alias as a column.
           if (
             i === 1 &&
@@ -301,8 +408,14 @@ export function validateQuery(
     };
 
     // Only validate refs when the scope actually has tables — a bare
-    // `SELECT 1` or a VALUES clause has nothing to resolve against.
-    if (tableRefs.length > 0 && tableRefs.every((t) => tableNames.has(t.name))) {
+    // `SELECT 1` or a VALUES clause has nothing to resolve against. Scopes
+    // reading from an opaque CTE (underivable output columns) also skip:
+    // every complaint would be noise.
+    if (
+      tableRefs.length > 0 &&
+      tableRefs.every((t) => tableNames.has(t.name)) &&
+      !tableRefs.some((t) => opaqueCtes.has(t.name))
+    ) {
       const selectItems = c.select === undefined ? [] : Array.isArray(c.select) ? c.select : [c.select];
       for (const item of selectItems) {
         const target =
@@ -315,8 +428,21 @@ export function validateQuery(
       if (c.where !== undefined) walkRefs(c.where as SqlExpr, `${scope}.where`);
       if (c.having !== undefined) walkRefs(c.having as SqlExpr, `${scope}.having`);
       if (c.qualify !== undefined) walkRefs(c.qualify as SqlExpr, `${scope}.qualify`);
+      // GROUP BY may name a select item by alias — not an unknown column.
+      const selectAliases = new Set<string>();
+      for (const item of selectItems) {
+        if (
+          Array.isArray(item) && item.length === 2 && typeof item[1] === "string" &&
+          !(typeof item[0] === "string")
+        ) {
+          selectAliases.add(item[1]);
+        }
+      }
       const groupItems = c["group-by"] === undefined ? [] : Array.isArray(c["group-by"]) ? c["group-by"] : [c["group-by"]];
-      for (const g of groupItems) walkRefs(g as SqlExpr, `${scope}.group-by`);
+      for (const g of groupItems) {
+        if (typeof g === "string" && selectAliases.has(g)) continue;
+        walkRefs(g as SqlExpr, `${scope}.group-by`);
+      }
     }
 
     // --- GROUP BY completeness ------------------------------------------
@@ -329,7 +455,38 @@ export function validateQuery(
         (g) => isRaw(g) && (g as { __raw: unknown }).__raw === "ALL"
       );
       if (!isGroupByAll) {
-        const groupKeys = new Set(groupItems.map((g) => exprKey(g as SqlExpr)));
+        const targetOf = (item: SqlExpr): SqlExpr => {
+          const aliased =
+            Array.isArray(item) && item.length === 2 && typeof item[1] === "string" &&
+            !(typeof item[0] === "string");
+          return aliased ? ((item as SqlExpr[])[0] as SqlExpr) : item;
+        };
+        const aliasOf = (item: SqlExpr): string | null =>
+          Array.isArray(item) && item.length === 2 && typeof item[1] === "string" &&
+          !(typeof item[0] === "string")
+            ? (item[1] as string)
+            : null;
+        // GROUP BY 2 names a select item by position; GROUP BY channel may
+        // name one by alias. Resolve both to the item's expression so the
+        // completeness check compares like with like.
+        const resolveGroupItem = (g: SqlExpr): SqlExpr => {
+          const n =
+            typeof g === "number"
+              ? g
+              : g !== null && typeof g === "object" && !Array.isArray(g) && "v" in g &&
+                (g as { float?: boolean }).float !== true
+                ? Number((g as { v: unknown }).v)
+                : NaN;
+          if (Number.isInteger(n) && n >= 1 && n <= selectItems.length) {
+            return targetOf(selectItems[n - 1] as SqlExpr);
+          }
+          if (typeof g === "string") {
+            const named = selectItems.find((item) => aliasOf(item as SqlExpr) === g);
+            if (named) return targetOf(named as SqlExpr);
+          }
+          return g;
+        };
+        const groupKeys = new Set(groupItems.map((g) => exprKey(resolveGroupItem(g as SqlExpr))));
         for (const item of selectItems) {
           const aliased =
             Array.isArray(item) && item.length === 2 && typeof item[1] === "string" &&

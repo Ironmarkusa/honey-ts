@@ -649,6 +649,12 @@ export function getReferencedColumns(
 
     // Recurse into arrays
     if (Array.isArray(e)) {
+      const head = typeof e[0] === "string" ? e[0].toLowerCase() : null;
+      // CAST's last argument is a type name, not a column reference.
+      if (head === "cast" || head === "try-cast") {
+        walk(e[1] as SqlExpr);
+        return;
+      }
       for (let i = 0; i < e.length; i++) {
         // Skip first element if it's an operator/function
         if (i === 0 && typeof e[0] === "string" &&

@@ -326,3 +326,70 @@ describe("end to end: the query-builder loop", () => {
     assert.equal(byPlan.free, undefined); // 5.00 order filtered out
   });
 });
+
+describe("validateQuery: real-world SQL shapes (CTEs, casts, ordinals)", () => {
+  test("CTE names resolve as tables in outer scopes", () => {
+    const clause = fromSql(
+      "WITH s AS (SELECT email FROM users) SELECT email FROM s",
+      { dialect: "duckdb" },
+    );
+    const res = validateQuery(clause, SCHEMA, { dialect: "duckdb" });
+    assert.deepEqual(res.problems, []);
+  });
+
+  test("typo inside a CTE still caught, with did-you-mean", () => {
+    const clause = fromSql(
+      "WITH s AS (SELECT emial FROM users) SELECT emial FROM s",
+      { dialect: "duckdb" },
+    );
+    const res = validateQuery(clause, SCHEMA, { dialect: "duckdb" });
+    const unknown = res.problems.filter((p) => p.code === "unknown-column");
+    assert.equal(unknown.length, 1);
+    assert.match(unknown[0]!.hint ?? "", /Did you mean "email"/);
+  });
+
+  test("CAST type names are not column references", () => {
+    const clause = fromSql(
+      "SELECT CAST(email AS VARCHAR), TRY_CAST(id AS BIGINT) FROM users",
+      { dialect: "duckdb" },
+    );
+    const res = validateQuery(clause, SCHEMA, { dialect: "duckdb" });
+    assert.deepEqual(res.problems, []);
+  });
+
+  test("CASE else marker is not a column reference", () => {
+    const clause = fromSql(
+      "SELECT CASE email WHEN 'a' THEN 1 ELSE 0 END FROM users",
+      { dialect: "duckdb" },
+    );
+    const res = validateQuery(clause, SCHEMA, { dialect: "duckdb" });
+    assert.deepEqual(res.problems, []);
+  });
+
+  test("GROUP BY ordinals satisfy the completeness check", () => {
+    const clause = fromSql(
+      "SELECT email, COUNT(*) FROM users GROUP BY 1",
+      { dialect: "duckdb" },
+    );
+    const res = validateQuery(clause, SCHEMA, { dialect: "duckdb" });
+    assert.deepEqual(res.problems, []);
+  });
+
+  test("GROUP BY select-alias satisfies the completeness check", () => {
+    const clause = fromSql(
+      "SELECT LOWER(email) AS e, COUNT(*) FROM users GROUP BY e",
+      { dialect: "duckdb" },
+    );
+    const res = validateQuery(clause, SCHEMA, { dialect: "duckdb" });
+    assert.deepEqual(res.problems, []);
+  });
+
+  test("opaque CTE (star select) suppresses column noise instead of erroring", () => {
+    const clause = fromSql(
+      "WITH s AS (SELECT * FROM users) SELECT anything FROM s",
+      { dialect: "duckdb" },
+    );
+    const res = validateQuery(clause, SCHEMA, { dialect: "duckdb" });
+    assert.deepEqual(res.problems, []);
+  });
+});
