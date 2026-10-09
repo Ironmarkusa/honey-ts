@@ -471,3 +471,26 @@ describe("round-trip regressions", () => {
     assert.strictEqual(sql, "SELECT x * 0.2164 FROM t");
   });
 });
+
+describe("IS [NOT] DISTINCT FROM in a JOIN condition", () => {
+  it("ends the right side at the next JOIN", () => {
+    const sql = "SELECT 1 FROM a AS r LEFT JOIN b AS x ON r.p IS NOT DISTINCT FROM x.value LEFT JOIN c AS y ON r.q IS NOT DISTINCT FROM y.value";
+    const [out] = toSql(fromSql(sql, { dialect: "duckdb" }), { dialect: "duckdb", inline: true });
+    assert.strictEqual(
+      out,
+      "SELECT 1 FROM a AS r LEFT JOIN b AS x ON r.p IS NOT DISTINCT FROM x.value LEFT JOIN c AS y ON r.q IS NOT DISTINCT FROM y.value",
+    );
+  });
+
+  it("ends at INNER / plain JOIN too", () => {
+    const sql = "SELECT 1 FROM a AS r INNER JOIN b AS x ON r.p IS DISTINCT FROM x.v JOIN c AS y ON r.q = y.v";
+    const [out] = toSql(fromSql(sql, { dialect: "duckdb" }), { dialect: "duckdb", inline: true });
+    assert.strictEqual(out, "SELECT 1 FROM a AS r INNER JOIN b AS x ON r.p IS DISTINCT FROM x.v INNER JOIN c AS y ON r.q = y.v");
+  });
+
+  it("does not treat a LEFT(...) call as a join", () => {
+    const sql = "SELECT 1 FROM a WHERE p IS NOT DISTINCT FROM LEFT(q, 3)";
+    const clause = fromSql(sql, { dialect: "duckdb" });
+    assert.deepStrictEqual(clause.where, ["is-not-distinct-from", "p", ["%left", "q", { v: 3 }]]);
+  });
+});

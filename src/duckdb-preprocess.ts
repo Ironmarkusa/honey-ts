@@ -86,7 +86,10 @@ function q(text: string): string {
 
 /** Clause keywords that terminate an expression captured mid-statement. */
 const CLAUSE_BOUNDARY =
-  /^(FROM|WHERE|GROUP|HAVING|WINDOW|QUALIFY|ORDER|LIMIT|OFFSET|FETCH|UNION|EXCEPT|INTERSECT|RETURNING|USING|ON\s+CONFLICT|FOR)\b/i;
+  /^(FROM|WHERE|GROUP|HAVING|WINDOW|QUALIFY|ORDER|LIMIT|OFFSET|FETCH|UNION|EXCEPT|INTERSECT|RETURNING|USING|ON\s+CONFLICT|FOR|(?:(?:(?:LEFT|RIGHT|FULL)(?:\s+OUTER)?|INNER|CROSS|NATURAL(?:\s+(?:LEFT|RIGHT|FULL|INNER)(?:\s+OUTER)?)?|ANTI|SEMI|ASOF|POSITIONAL)\s+)?JOIN)\b/i;
+// The JOIN arm ends an ON condition at the next join (`… ON a IS NOT DISTINCT
+// FROM b LEFT JOIN c …`). It requires the JOIN keyword, so a `LEFT(s, 3)` /
+// `RIGHT(s, 3)` call inside an expression is never mistaken for a boundary.
 
 /**
  * Find where a clause-level expression ends: the next top-level clause
