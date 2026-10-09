@@ -59,7 +59,7 @@ export interface FromSqlOptions {
   dialect?: "postgres" | "duckdb";
 }
 
-import { isClause } from "./types.js";
+import { isClause, isIdent } from "./types.js";
 import type { SqlClause, SqlExpr } from "./types.js";
 
 // ============================================================================
@@ -84,8 +84,12 @@ function exprToClause(expr: Expr | null | undefined): SqlExpr {
         }
         return { ident: [ref.table.name, name] };
       }
-      // Wrap identifiers containing dots to preserve them as single units
-      if (name.includes(".")) {
+      // Wrap identifiers containing dots to preserve them as single units.
+      // Also wrap any name a bare string cannot carry as an identifier
+      // ("Lead Source", "2024 total", "a-b"): as a plain string the
+      // formatter reads it as a value and emits a string literal, so
+      // `"Lead Source"` would round-trip to `'Lead Source'`.
+      if (name.includes(".") || !isIdent(name)) {
         return { ident: [name] };
       }
       return name;

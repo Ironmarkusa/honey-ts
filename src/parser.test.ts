@@ -287,6 +287,23 @@ describe("WITHIN GROUP and aggregate ORDER BY", () => {
 });
 
 describe("quoted identifiers with spaces", () => {
+  it("keeps an UNQUALIFIED quoted column with a space an identifier, not a string", () => {
+    // Regression: `"Lead Source"` used to parse to the bare string "Lead Source",
+    // which the formatter emits as the string literal 'Lead Source'.
+    const clause = fromSql(`SELECT "Lead Source", lower("Deal Stage") = 'won' FROM t`, { dialect: "duckdb" });
+    assert.deepStrictEqual(clause.select, [
+      { ident: ["Lead Source"] },
+      ["=", ["%lower", { ident: ["Deal Stage"] }], { v: "won" }],
+    ]);
+    const [out] = toSql(clause, { dialect: "duckdb", inline: true });
+    assert.strictEqual(out, `SELECT "Lead Source", LOWER("Deal Stage") = 'won' FROM t`);
+  });
+
+  it("keeps an unqualified column that starts with a digit an identifier", () => {
+    const [out] = toSql(fromSql(`SELECT "2024 total" FROM t`, { dialect: "duckdb" }), { dialect: "duckdb", inline: true });
+    assert.strictEqual(out, `SELECT "2024 total" FROM t`);
+  });
+
   it("parses and formats column names with spaces", () => {
     const sql = `SELECT s."Store Name" as location FROM staging.imports s`;
     const clause = fromSql(sql);
