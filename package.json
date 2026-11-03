@@ -52,7 +52,7 @@
   "dependencies": {
     "pgsql-ast-parser": "^12.0.2",
     "sql-formatter": "^15.7.0",
-    "zod": "^4.3.6"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@duckdb/node-api": "^1.5.5-r.4",
